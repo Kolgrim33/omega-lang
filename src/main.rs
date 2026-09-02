@@ -1,4 +1,5 @@
 mod ast;
+mod backend;
 mod interpreter;
 mod ip;
 mod lexer;

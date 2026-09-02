@@ -6,7 +6,12 @@
 // decides how to actually do that. Nmap is used when it's on PATH; when
 // it isn't (e.g. this sandbox), Omega falls back to a plain TCP-connect
 // probe so the language still runs end to end.
+//
+// Nmap and TCP-connect are both implementations of the ProbeBackend trait
+// (see backend.rs), so adding a new backend later (SSH banner-grab, HTTP
+// probe) is purely additive — no changes needed here or in interpreter.rs.
 
+use crate::backend::ProbeBackend;
 use crate::parallel::parallel_map;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::process::Command;
@@ -34,38 +39,36 @@ pub fn nmap_available() -> bool {
     })
 }
 
-/// Returns true if the host responds to a TCP connect attempt on any probe
-/// port, or answers to `nmap -sn` when nmap is available.
-pub fn discover_host(ip: &str) -> bool {
+/// Picks nmap when it's on PATH, otherwise the TCP-connect fallback.
+/// Both backends are zero-sized (unit structs), so boxing them is cheap
+/// and this can be called freely without worrying about reuse.
+pub fn select_backend() -> Box<dyn ProbeBackend + Send + Sync> {
     if nmap_available() {
+        Box::new(NmapBackend)
+    } else {
+        Box::new(TcpConnectBackend)
+    }
+}
+
+pub struct NmapBackend;
+
+impl ProbeBackend for NmapBackend {
+    fn name(&self) -> &'static str {
+        "nmap"
+    }
+
+    fn discover_host(&self, ip: &str) -> bool {
         if let Ok(output) = Command::new("nmap").arg("-sn").arg(ip).output() {
             let text = String::from_utf8_lossy(&output.stdout);
             return text.contains("Host is up");
         }
+        // nmap is on PATH but this invocation failed (permissions, etc.)
+        // — fall back to a direct probe rather than silently reporting
+        // the host as down.
+        TcpConnectBackend.discover_host(ip)
     }
-    let results = parallel_map(COMMON_PORTS, |&p| tcp_probe(ip, p).is_ok());
-    results.into_iter().any(|up| up)
-}
 
-/// Runs `discover_host` across many candidate IPs in parallel and returns
-/// just the ones that answered, in the same order they were given. This is
-/// what makes `discover hosts` practical on anything wider than a single
-/// address: without it, a /24 would mean up to 256 hosts probed one at a
-/// time.
-pub fn discover_hosts(ips: &[String]) -> Vec<String> {
-    let flags = parallel_map(ips, |ip| discover_host(ip));
-    ips.iter()
-        .zip(flags)
-        .filter_map(|(ip, up)| if up { Some(ip.clone()) } else { None })
-        .collect()
-}
-
-/// Returns the list of open ports found on `ip`. `port_range` is an
-/// optional "start-end" string (e.g. "1-1024"); when absent the fallback
-/// path checks COMMON_PORTS instead of every port, to stay fast without
-/// nmap's raw-socket scanning.
-pub fn scan_ports(ip: &str, port_range: Option<&str>) -> Result<Vec<u16>, String> {
-    if nmap_available() {
+    fn scan_ports(&self, ip: &str, port_range: Option<&str>) -> Result<Vec<u16>, String> {
         let mut cmd = Command::new("nmap");
         match port_range {
             // An explicit "ports 1-1024" style range in the script maps
@@ -84,29 +87,13 @@ pub fn scan_ports(ip: &str, port_range: Option<&str>) -> Result<Vec<u16>, String
             .output()
             .map_err(|e| format!("failed to run nmap: {}", e))?;
         let text = String::from_utf8_lossy(&output.stdout);
-        return Ok(parse_nmap_ports(&text));
+        Ok(parse_nmap_ports(&text))
     }
 
-    let candidates: Vec<u16> = match port_range {
-        Some(range) => parse_port_range(range)?,
-        None => COMMON_PORTS.to_vec(),
-    };
-    let is_open = parallel_map(&candidates, |&p| tcp_probe(ip, p).is_ok());
-    let mut open: Vec<u16> = candidates
-        .into_iter()
-        .zip(is_open)
-        .filter_map(|(p, ok)| if ok { Some(p) } else { None })
-        .collect();
-    open.sort_unstable();
-    Ok(open)
-}
-
-/// Best-effort service name for each open port. Uses `nmap -sV` when
-/// available; otherwise falls back to a small built-in port/service table,
-/// which is intentionally conservative (it labels unknowns "unknown"
-/// rather than guessing).
-pub fn identify_services(ip: &str, ports: &[u16]) -> Vec<(u16, String)> {
-    if nmap_available() && !ports.is_empty() {
+    fn identify_services(&self, ip: &str, ports: &[u16]) -> Vec<(u16, String)> {
+        if ports.is_empty() {
+            return Vec::new();
+        }
         let port_list = ports
             .iter()
             .map(|p| p.to_string())
@@ -125,13 +112,78 @@ pub fn identify_services(ip: &str, ports: &[u16]) -> Vec<(u16, String)> {
                 return parsed;
             }
         }
+        TcpConnectBackend.identify_services(ip, ports)
+    }
+}
+
+pub struct TcpConnectBackend;
+
+impl ProbeBackend for TcpConnectBackend {
+    fn name(&self) -> &'static str {
+        "tcp-connect"
     }
 
-    ports
-        .iter()
-        .map(|&p| (p, guess_service(p).to_string()))
+    fn discover_host(&self, ip: &str) -> bool {
+        let results = parallel_map(COMMON_PORTS, |&p| tcp_probe(ip, p).is_ok());
+        results.into_iter().any(|up| up)
+    }
+
+    fn scan_ports(&self, ip: &str, port_range: Option<&str>) -> Result<Vec<u16>, String> {
+        let candidates: Vec<u16> = match port_range {
+            Some(range) => parse_port_range(range)?,
+            None => COMMON_PORTS.to_vec(),
+        };
+        let is_open = parallel_map(&candidates, |&p| tcp_probe(ip, p).is_ok());
+        let mut open: Vec<u16> = candidates
+            .into_iter()
+            .zip(is_open)
+            .filter_map(|(p, ok)| if ok { Some(p) } else { None })
+            .collect();
+        open.sort_unstable();
+        Ok(open)
+    }
+
+    fn identify_services(&self, _ip: &str, ports: &[u16]) -> Vec<(u16, String)> {
+        ports
+            .iter()
+            .map(|&p| (p, guess_service(p).to_string()))
+            .collect()
+    }
+}
+
+// ---- Public API — unchanged signatures, so interpreter.rs needs no edits ----
+
+/// Returns true if the host responds to a TCP connect attempt on any probe
+/// port, or answers to `nmap -sn` when nmap is available.
+pub fn discover_host(ip: &str) -> bool {
+    select_backend().discover_host(ip)
+}
+
+/// Runs `discover_host` across many candidate IPs in parallel and returns
+/// just the ones that answered, in the same order they were given. This is
+/// what makes `discover hosts` practical on anything wider than a single
+/// address: without it, a /24 would mean up to 256 hosts probed one at a
+/// time.
+pub fn discover_hosts(ips: &[String]) -> Vec<String> {
+    let backend = select_backend();
+    let flags = parallel_map(ips, |ip| backend.discover_host(ip));
+    ips.iter()
+        .zip(flags)
+        .filter_map(|(ip, up)| if up { Some(ip.clone()) } else { None })
         .collect()
 }
+
+/// Returns the list of open ports found on `ip`.
+pub fn scan_ports(ip: &str, port_range: Option<&str>) -> Result<Vec<u16>, String> {
+    select_backend().scan_ports(ip, port_range)
+}
+
+/// Best-effort service name for each open port.
+pub fn identify_services(ip: &str, ports: &[u16]) -> Vec<(u16, String)> {
+    select_backend().identify_services(ip, ports)
+}
+
+// ---- Shared helpers (unchanged from the original) ----
 
 fn tcp_probe(ip: &str, port: u16) -> std::io::Result<()> {
     let addr: SocketAddr = format!("{}:{}", ip, port)
