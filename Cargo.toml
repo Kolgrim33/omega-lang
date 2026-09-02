@@ -1,0 +1,10 @@
+[package]
+name = "omega"
+version = "0.1.0"
+edition = "2021"
+description = "Omega: a security-first programming language for cybersecurity automation"
+
+[[bin]]
+name = "omega"
+path = "src/main.rs"
+

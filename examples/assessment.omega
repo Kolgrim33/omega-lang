@@ -1,0 +1,12 @@
+assessment "internal-network" {
+    target 127.0.0.1
+
+    discover hosts
+    scan ports {
+        ports 1-9000
+        services
+        timeout 3s
+    }
+
+    report
+}
