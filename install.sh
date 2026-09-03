@@ -32,12 +32,14 @@ url="https://github.com/${REPO}/releases/latest/download/${asset}"
 dest="/usr/local/bin/omega"
 
 echo "Downloading omega for ${os}/${arch}..."
+
 if [ -w "/usr/local/bin" ]; then
   curl -fsSL "$url" -o "$dest"
+  chmod +x "$dest"
 else
   sudo curl -fsSL "$url" -o "$dest"
+  sudo chmod +x "$dest"
 fi
-chmod +x "$dest"
 
 echo "Installed to $dest"
 omega --version 2>/dev/null || echo "Run 'omega <script.omg>' to get started."
