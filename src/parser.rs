@@ -75,7 +75,7 @@ impl Parser {
         let mut opts = ScanOptions::default();
 
         while !self.check(&Token::RBrace) {
-            let key = self.expect_word("a scan option (ports, services, timeout)")?;
+            let key = self.expect_word("a scan option (ports, services, timeout, os_detect, nse_scripts)")?;
             match key.as_str() {
                 "ports" => {
                     let range = self.expect_word("a port range (e.g. 1-65535)")?;
@@ -83,6 +83,13 @@ impl Parser {
                 }
                 "services" => {
                     opts.services = true;
+                }
+                "os_detect" => {
+                    opts.os_detect = true;
+                }
+                "nse_scripts" => {
+                    let category = self.expect_string("an NSE script category, e.g. vuln")?;
+                    opts.nse_scripts = Some(category);
                 }
                 "timeout" => {
                     let raw = self.expect_word("a timeout, e.g. 3s")?;

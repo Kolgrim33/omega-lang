@@ -1,0 +1,7 @@
+target 127.0.0.1
+authorized_scope 127.0.0.1
+
+discover hosts
+scan ports { ports 1-1024 services os_detect nse_scripts "vuln" }
+
+report

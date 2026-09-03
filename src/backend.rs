@@ -17,4 +17,22 @@ pub trait ProbeBackend {
 
     /// Best-effort (port, service name) pairs for the given open ports.
     fn identify_services(&self, ip: &str, ports: &[u16]) -> Vec<(u16, String)>;
+
+    /// Best-effort OS fingerprint (e.g. "Linux 5.4 - 5.15"). Most backends
+    /// can't do this — the default implementation reports that clearly
+    /// rather than the interpreter silently omitting OS info. Only a
+    /// backend that genuinely supports OS fingerprinting (nmap, with
+    /// sufficient privileges) needs to override this.
+    fn detect_os(&self, ip: &str) -> Result<String, String> {
+        let _ = ip;
+        Err(format!("{} does not support OS detection (requires nmap)", self.name()))
+    }
+
+    /// Runs an NSE script category (e.g. "vuln", "default") against `ip`
+    /// and returns raw finding lines. Default: unsupported, same
+    /// reasoning as detect_os above.
+    fn run_nse_scripts(&self, ip: &str, category: &str) -> Result<Vec<String>, String> {
+        let _ = (ip, category);
+        Err(format!("{} does not support NSE scripts (requires nmap)", self.name()))
+    }
 }
