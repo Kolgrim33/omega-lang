@@ -1,6 +1,9 @@
 # Omega
 
-Omega is a small, security-first programming language for cybersecurity
+<img width="1080" height="1080" alt="omegalogo" src="https://github.com/user-attachments/assets/ed38bd9f-303d-4278-95f0-3bc6e432bac7" />
+
+
+Omega is a  security-first programming language for cybersecurity
 automation. Instead of writing Python calls into scanning libraries, you
 describe the security operation you want:
 
