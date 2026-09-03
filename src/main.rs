@@ -5,6 +5,7 @@ mod ip;
 mod lexer;
 mod parallel;
 mod parser;
+mod report;
 mod scan;
 
 use interpreter::Interpreter;

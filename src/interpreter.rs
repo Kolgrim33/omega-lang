@@ -1,6 +1,7 @@
-use crate::ast::{Program, ScanOptions, Stmt};
+use crate::ast::{Program, ReportDestination, ReportFormat, ScanOptions, Stmt};
 use crate::ip::{format_ipv4, Cidr};
 use crate::parallel::parallel_map;
+use crate::report;
 use crate::scan;
 
 #[derive(Debug, Clone)]
@@ -49,10 +50,13 @@ impl Interpreter {
             Stmt::Discover => self.exec_discover(),
             Stmt::ScanPorts { options } => self.exec_scan_ports(options),
             Stmt::IdentifyServices => self.exec_identify_services(),
-            Stmt::Report => {
-                self.print_report();
-                Ok(())
-            }
+            Stmt::Report { destination } => match destination {
+                None => {
+                    self.print_report();
+                    Ok(())
+                }
+                Some(dest) => self.write_report(dest),
+            },
             Stmt::Assessment { name, body } => {
                 println!("== assessment: {} ==", name);
                 for inner in body {
@@ -198,6 +202,19 @@ impl Interpreter {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn write_report(&self, dest: &ReportDestination) -> Result<(), String> {
+        match dest.format {
+            ReportFormat::Json => {
+                report::write_json(&dest.path, self.target, self.authorized_scope, &self.hosts)?
+            }
+            ReportFormat::Html => {
+                report::write_html(&dest.path, self.target, self.authorized_scope, &self.hosts)?
+            }
+        }
+        println!("report written to {}", dest.path);
         Ok(())
     }
 

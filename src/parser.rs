@@ -1,4 +1,4 @@
-use crate::ast::{Program, ScanOptions, Stmt};
+use crate::ast::{Program, ReportDestination, ReportFormat, ScanOptions, Stmt};
 use crate::lexer::Token;
 
 pub struct Parser {
@@ -52,7 +52,21 @@ impl Parser {
                 self.expect_exact_word("services")?;
                 Ok(Stmt::IdentifyServices)
             }
-            "report" => Ok(Stmt::Report),
+            "report" => {
+                if self.match_word("to") {
+                    let path = self.expect_string("a report file path in quotes")?;
+                    let format = if path.ends_with(".json") {
+                        ReportFormat::Json
+                    } else if path.ends_with(".html") || path.ends_with(".htm") {
+                        ReportFormat::Html
+                    } else {
+                        return Err(format!("unsupported report format for '{}': expected .json or .html", path));
+                    };
+                    Ok(Stmt::Report { destination: Some(ReportDestination { path, format }) })
+                } else {
+                    Ok(Stmt::Report { destination: None })
+                }
+            }
             "assessment" => {
                 let name = self.expect_string("an assessment name in quotes")?;
                 self.expect(&Token::LBrace)?;
