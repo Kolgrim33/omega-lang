@@ -1,8 +1,9 @@
-use crate::ast::{Program, ReportDestination, ReportFormat, ScanOptions, Stmt};
+use crate::ast::{Program, ReportDestination, ReportFormat, ScanOptions, Stmt, WebScanOptions};
 use crate::ip::{format_ipv4, Cidr};
 use crate::parallel::parallel_map;
 use crate::report;
 use crate::scan;
+use crate::webchecks;
 
 #[derive(Debug, Clone)]
 pub struct Host {
@@ -10,7 +11,7 @@ pub struct Host {
     pub open_ports: Vec<u16>,
     pub services: Vec<(u16, String)>,
     pub os: Option<String>,
-    pub nse_findings: Vec<String>,
+    pub findings: Vec<String>,
 }
 
 pub struct Interpreter {
@@ -18,6 +19,8 @@ pub struct Interpreter {
     target: Option<Cidr>,
     hosts: Vec<Host>,
 }
+
+const DEFAULT_WEB_PORTS: &[u16] = &[80, 8080, 8000, 8888, 443, 8443];
 
 impl Interpreter {
     pub fn new() -> Self {
@@ -49,6 +52,7 @@ impl Interpreter {
             }
             Stmt::Discover => self.exec_discover(),
             Stmt::ScanPorts { options } => self.exec_scan_ports(options),
+            Stmt::ScanWeb { options } => self.exec_scan_web(options),
             Stmt::IdentifyServices => self.exec_identify_services(),
             Stmt::Report { destination } => match destination {
                 None => {
@@ -89,7 +93,7 @@ impl Interpreter {
                 open_ports: Vec::new(),
                 services: Vec::new(),
                 os: None,
-                nse_findings: Vec::new(),
+                findings: Vec::new(),
             });
         }
         if alive.is_empty() {
@@ -138,6 +142,70 @@ impl Interpreter {
         if let Some(category) = &options.nse_scripts {
             self.exec_nse_scripts(category)?;
         }
+        Ok(())
+    }
+
+    fn exec_scan_web(&mut self, options: &WebScanOptions) -> Result<(), String> {
+        if self.hosts.is_empty() {
+            return Err("scan web: no discovered hosts (run 'discover hosts' first)".to_string());
+        }
+        println!("running web checks...");
+
+        let scope = self.authorized_scope;
+        let explicit_port = options.port;
+        let check_paths = options.paths;
+        let check_headers = options.headers;
+
+        let jobs: Vec<(String, u16)> = self
+            .hosts
+            .iter()
+            .flat_map(|h| {
+                let ports: Vec<u16> = match explicit_port {
+                    Some(p) => vec![p],
+                    None => h
+                        .open_ports
+                        .iter()
+                        .copied()
+                        .filter(|p| DEFAULT_WEB_PORTS.contains(p))
+                        .collect(),
+                };
+                let ip = h.ip.clone();
+                ports.into_iter().map(move |p| (ip.clone(), p))
+            })
+            .collect();
+
+        if jobs.is_empty() {
+            println!("  no web ports to check (run 'scan ports' first, or specify 'port <n>' explicitly)");
+            return Ok(());
+        }
+
+        let results: Vec<(String, u16, Vec<String>)> = parallel_map(&jobs, |(ip, port)| {
+            let ip_num = crate::ip::parse_ipv4(ip).unwrap_or(0);
+            if !in_scope(scope, ip_num) {
+                eprintln!("ERROR: target {} is outside authorized scope.", ip);
+                return (ip.clone(), *port, Vec::new());
+            }
+            let mut findings = webchecks::run_checks(ip, *port, check_paths, check_headers);
+            if (*port == 443 || *port == 8443) && findings.iter().any(|f| f.contains("failed")) {
+                findings.push(
+                    "note: HTTPS/TLS web checks are not yet supported by Omega — this port was probed as plain HTTP"
+                        .to_string(),
+                );
+            }
+            (ip.clone(), *port, findings)
+        });
+
+        for (ip, port, findings) in results {
+            if findings.is_empty() {
+                println!("  {}:{}: no findings", ip, port);
+            } else {
+                println!("  {}:{}: {} finding(s)", ip, port, findings.len());
+            }
+            if let Some(host) = self.hosts.iter_mut().find(|h| h.ip == ip) {
+                host.findings.extend(findings);
+            }
+        }
+
         Ok(())
     }
 
@@ -194,7 +262,7 @@ impl Interpreter {
                         println!("  {}: {} finding(s)", ip, findings.len());
                     }
                     if let Some(host) = self.hosts.iter_mut().find(|h| h.ip == ip) {
-                        host.nse_findings = findings;
+                        host.findings.extend(findings);
                     }
                 }
                 Err(e) => {
@@ -248,9 +316,9 @@ impl Interpreter {
             if let Some(os) = &host.os {
                 println!("  os: {}", os);
             }
-            if !host.nse_findings.is_empty() {
-                println!("  nse findings:");
-                for line in &host.nse_findings {
+            if !host.findings.is_empty() {
+                println!("  findings:");
+                for line in &host.findings {
                     println!("    {}", line);
                 }
             }

@@ -1,35 +1,43 @@
 // Structured report output (JSON / HTML) for `report to "..."`.
 //
 // Hand-rolled rather than pulling in serde_json or a templating crate,
-// matching the project's zero-dependency design goal. Escaping is done
-// manually for both formats — see json_escape / html_escape below.
+// matching the project's zero-dependency design goal.
 
 use crate::interpreter::Host;
 use crate::ip::{format_ipv4, Cidr};
 use std::fs;
 
-/// A single classified finding line, derived from an NSE script output
-/// line. Classification is intentionally simple and conservative: nmap's
-/// own script output already flags real vulnerabilities with the literal
-/// word "VULNERABLE", so that's the most reliable signal available
-/// without parsing each script's bespoke output format individually.
 pub struct Finding {
     pub severity: &'static str, // "high" | "medium" | "info"
     pub text: String,
 }
 
-pub fn classify_nse_line(line: &str) -> Finding {
-    let upper = line.to_uppercase();
-    let severity = if upper.contains("VULNERABLE") {
+/// Classifies any finding line — from NSE scripts or web checks — by
+/// severity. Keyword-based and intentionally conservative: nmap's own
+/// output already flags real vulnerabilities with "VULNERABLE", and
+/// exposed-secret paths are named explicitly enough (.env, .git,
+/// credentials, private key) to catch reliably without a full CVE
+/// database.
+pub fn classify_finding(text: &str) -> Finding {
+    let upper = text.to_uppercase();
+    let severity = if upper.contains("VULNERABLE")
+        || upper.contains("CREDENTIALS")
+        || upper.contains("PRIVATE KEY")
+        || upper.contains(".ENV")
+        || upper.contains(".GIT")
+        || upper.contains(".HTPASSWD")
+        || upper.contains("BACKUP")
+        || upper.contains("DATABASE")
+    {
         "high"
-    } else if upper.contains("CVE-") {
+    } else if upper.contains("CVE-") || upper.contains("ADMIN") || upper.contains("PANEL") {
         "medium"
     } else {
         "info"
     };
     Finding {
         severity,
-        text: line.to_string(),
+        text: text.to_string(),
     }
 }
 
@@ -69,13 +77,13 @@ pub fn write_json(
             None => out.push_str("      \"os\": null,\n"),
         }
         out.push_str("      \"findings\": [\n");
-        for (j, line) in host.nse_findings.iter().enumerate() {
-            let f = classify_nse_line(line);
+        for (j, line) in host.findings.iter().enumerate() {
+            let f = classify_finding(line);
             out.push_str(&format!(
                 "        {{ \"severity\": \"{}\", \"text\": \"{}\" }}{}\n",
                 f.severity,
                 json_escape(&f.text),
-                if j + 1 < host.nse_findings.len() { "," } else { "" }
+                if j + 1 < host.findings.len() { "," } else { "" }
             ));
         }
         out.push_str("      ]\n");
@@ -133,10 +141,10 @@ pub fn write_html(
         if let Some(os) = &host.os {
             out.push_str(&format!("<p><b>OS:</b> {}</p>\n", html_escape(os)));
         }
-        if !host.nse_findings.is_empty() {
+        if !host.findings.is_empty() {
             out.push_str("<div>\n");
-            for line in &host.nse_findings {
-                let f = classify_nse_line(line);
+            for line in &host.findings {
+                let f = classify_finding(line);
                 out.push_str(&format!(
                     "<div class=\"finding {}\">{}</div>\n",
                     f.severity,

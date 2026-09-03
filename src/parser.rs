@@ -1,4 +1,4 @@
-use crate::ast::{Program, ReportDestination, ReportFormat, ScanOptions, Stmt};
+use crate::ast::{Program, ReportDestination, ReportFormat, ScanOptions, Stmt, WebScanOptions};
 use crate::lexer::Token;
 
 pub struct Parser {
@@ -40,13 +40,26 @@ impl Parser {
                 Ok(Stmt::Discover)
             }
             "scan" => {
-                self.expect_exact_word("ports")?;
-                let options = if self.check(&Token::LBrace) {
-                    self.parse_scan_block()?
-                } else {
-                    ScanOptions::default()
-                };
-                Ok(Stmt::ScanPorts { options })
+                let kind = self.expect_word("'ports' or 'web'")?;
+                match kind.as_str() {
+                    "ports" => {
+                        let options = if self.check(&Token::LBrace) {
+                            self.parse_scan_block()?
+                        } else {
+                            ScanOptions::default()
+                        };
+                        Ok(Stmt::ScanPorts { options })
+                    }
+                    "web" => {
+                        let options = if self.check(&Token::LBrace) {
+                            self.parse_web_block()?
+                        } else {
+                            WebScanOptions::default()
+                        };
+                        Ok(Stmt::ScanWeb { options })
+                    }
+                    other => Err(format!("expected 'ports' or 'web' after 'scan', found '{}'", other)),
+                }
             }
             "identify" => {
                 self.expect_exact_word("services")?;
@@ -120,6 +133,29 @@ impl Parser {
         Ok(opts)
     }
 
+    fn parse_web_block(&mut self) -> Result<WebScanOptions, String> {
+        self.expect(&Token::LBrace)?;
+        self.skip_newlines();
+        let mut opts = WebScanOptions::default();
+        while !self.check(&Token::RBrace) {
+            let key = self.expect_word("a web scan option (paths, headers, port)")?;
+            match key.as_str() {
+                "paths" => opts.paths = true,
+                "headers" => opts.headers = true,
+                "port" => {
+                    let raw = self.expect_word("a port number")?;
+                    let port: u16 = raw
+                        .parse()
+                        .map_err(|_| format!("invalid port '{}'", raw))?;
+                    opts.port = Some(port);
+                }
+                other => return Err(format!("unknown web scan option '{}'", other)),
+            }
+            self.skip_newlines();
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(opts)
+    }
     // --- token helpers ---
 
     fn at_eof(&self) -> bool {

@@ -5,9 +5,8 @@ pub enum Stmt {
     AuthorizedScope(String),
     Discover,
     ScanPorts { options: ScanOptions },
+    ScanWeb { options: WebScanOptions },
     IdentifyServices,
-    /// `report` (destination: None, prints to stdout) or
-    /// `report to "findings.json"` / `report to "findings.html"`.
     Report { destination: Option<ReportDestination> },
     Assessment { name: String, body: Vec<Stmt> },
 }
@@ -18,6 +17,14 @@ pub struct ScanOptions {
     pub timeout_secs: Option<u64>,
     pub os_detect: bool,
     pub nse_scripts: Option<String>,
+}
+#[derive(Debug, Clone, Default)]
+pub struct WebScanOptions {
+    pub paths: bool,
+    pub headers: bool,
+    /// Explicit port to check. None means "try common web ports among
+    /// this host's already-discovered open ports".
+    pub port: Option<u16>,
 }
 #[derive(Debug, Clone)]
 pub enum ReportFormat {

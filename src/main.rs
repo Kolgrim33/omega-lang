@@ -1,5 +1,6 @@
 mod ast;
 mod backend;
+mod http;
 mod interpreter;
 mod ip;
 mod lexer;
@@ -7,6 +8,7 @@ mod parallel;
 mod parser;
 mod report;
 mod scan;
+mod webchecks;
 
 use interpreter::Interpreter;
 use lexer::Lexer;
