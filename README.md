@@ -141,8 +141,11 @@ assessment "name" { ... } # named wrapper — can contain any of the above
 
 ## Tests
 
-cargo test
+Create scripts by using for example 
+nano script.omg
 
+Then execute with
+omega script.omg
 
 ## What's next (not built yet)
 
