@@ -10,6 +10,9 @@ target 192.168.1.0/24
 discover hosts
 scan ports { services os_detect nse_scripts "vuln" }
 scan web { paths headers }
+scan network
+scan dns "example.com" { spf dmarc subdomains }
+export hosts to "targets.txt"
 report to "findings.json"
 
 
@@ -33,7 +36,8 @@ This is a real tree-walking interpreter, not a mockup:
 - **Lexer/parser** (`src/lexer.rs`, `src/parser.rs`, `src/ast.rs`) — turns
   `.omega`/`.omg` source into an AST covering `target`,
   `authorized_scope`, `discover [hosts]`, `scan ports { ... }`,
-  `scan web { ... }`, `identify services`, `report [to "..."]`, and
+  `scan web { ... }`, `scan dns "..." { ... }`, `scan network`,
+  `identify services`, `report [to "..."]`, `export hosts to "..."`, and
   `assessment "name" { ... }` blocks.
 - **Scope enforcement** (`src/interpreter.rs`) — `authorized_scope` (or the
   first `target`, implicitly) is checked before every host is touched. A
@@ -49,8 +53,9 @@ This is a real tree-walking interpreter, not a mockup:
     fingerprinting, `--script <category>` for NSE) and parses its output.
     OS detection checks for root privileges up front and fails with a
     clear message rather than nmap's less friendly error; NSE and OS
-    scans carry timeouts so a script category with a long internal
-    timeout can't hang a run indefinitely;
+    scans carry timeouts (`--script-timeout`, `--host-timeout`) so a
+    script category with a long internal timeout can't hang a run
+    indefinitely;
   - if `nmap` isn't installed, Omega falls back to its own parallel
     TCP-connect probing plus a small built-in port/service table for
     discovery/scanning/service-ID, so the language still runs end to end
@@ -73,12 +78,41 @@ This is a real tree-walking interpreter, not a mockup:
     are currently probed as plain HTTP — TLS support isn't implemented
     yet, and the report says so explicitly rather than silently
     misreporting an HTTPS-only host.
+- **DNS and email security checks** (`src/dns.rs`, `src/dnschecks.rs`) —
+  `scan dns "domain" { spf dmarc subdomains }`:
+  - a hand-rolled, zero-dependency DNS client (raw UDP, RFC 1035 wire
+    format — no external resolver crate) checks for SPF and DMARC TXT
+    records (missing either is a real, common email-spoofing exposure);
+  - subdomain enumeration against a curated wordlist of ~34 common names.
+    Note: this is wordlist-based, not Certificate-Transparency-based —
+    real recon tools like subfinder/amass discover far more via
+    crt.sh-style CT log queries, which Omega doesn't do yet;
+  - `scan dns` requires `authorized_scope` to already be declared in the
+    script (even though DNS lookups against a public resolver aren't
+    IP-scoped) — Omega's "declare scope before anything runs" principle
+    still applies at the script level.
+- **Local network discovery via ARP** (`src/arp.rs`) — `scan network`
+  reads the OS's own ARP table (`/proc/net/arp` on Linux, `arp -a` on
+  macOS/BSD) after forcing a connection sweep to populate it, rather than
+  sending raw ARP packets directly (which would need an `unsafe`,
+  Linux-only raw socket outside this project's design so far). Enriches
+  already-discovered hosts with MAC address and a best-effort vendor
+  (small curated OUI table, ~24 common vendors — not the full IEEE
+  registry), and can surface devices that answered ARP but no port scan
+  at all. Known limitations: only sees the local network segment (not
+  across a router), and ARP entries can go stale between the sweep and
+  the read, so not every host is guaranteed a MAC on a given run.
 - **Structured reporting** (`src/report.rs`) — `report` with no
   destination prints to stdout as before; `report to "findings.json"` or
   `report to "findings.html"` write a hand-rolled structured report (no
-  serde/templating dependency). Every finding — from NSE scripts or web
+  serde/templating dependency), including host MAC/vendor and
+  domain-level DNS findings. Every finding — from NSE scripts or web
   checks — is classified `high`/`medium`/`info` by severity so results
   are usable at scale, not just a wall of raw text.
+- **Target-list export for tool chaining** (`src/export.rs`) — `export
+  hosts to "targets.txt"` (plain `ip:port` lines) or `.csv` (`ip,port,
+  service` columns), so recon results can feed into another tool instead
+  of Omega being a closed loop.
 - **Parallel execution** (`src/parallel.rs`) — hosts, ports, and web
   checks are probed concurrently (bounded thread pool built on
   `std::thread::scope`, no external crates), so `discover hosts` on a
@@ -95,6 +129,27 @@ cargo install --path .
 No external crates are required for the core interpreter — this keeps
 the toolchain requirement low and avoids dependency-version surprises.
 
+For local development, use the Makefile instead of raw `cargo`/installed
+`omega` commands — it keeps you testing against what you actually just
+built rather than a stale installed binary:
+
+make run SCRIPT=examples/some_script.omg # build + run against target/debug
+make test # run the test suite
+make install # build --release and update the installed omega
+
+
+## Writing your own scripts
+
+Create a `.omg` (or `.omega`) file with any text editor:
+
+nano myscript.omg
+
+
+Then run it:
+
+omega myscript.omg
+
+
 ## Example scripts
 
 - `examples/first_milestone.omg` — the milestone from the design doc:
@@ -107,7 +162,11 @@ the toolchain requirement low and avoids dependency-version surprises.
 - `examples/deep_scan.omg` — OS detection and NSE `vuln` scripts against
   a single host.
 - `examples/report_test.omg` — writing structured JSON and HTML reports.
+- `examples/severity_test.omg` — exercises high/medium/info finding
+  classification.
 - `examples/web_scan.omg` — HTTP vulnerability scanning (`scan web`).
+- `examples/network_scan.omg` — ARP-based local network discovery
+  (`scan network`).
 
 ## Full syntax reference
 
@@ -130,11 +189,22 @@ headers # check for missing security headers
 port <n> # optional explicit port
 }
 
+scan dns "domain.com" {
+spf # check for SPF TXT record
+dmarc # check for DMARC TXT record
+subdomains # enumerate common subdomains
+}
+
+scan network # ARP-based local network discovery
+
 identify services # standalone version of the flag above
 
 report # print to stdout
 report to "findings.json" # write structured JSON
 report to "findings.html" # write styled HTML
+
+export hosts to "targets.txt" # plain ip:port lines
+export hosts to "targets.csv" # ip,port,service columns
 
 assessment "name" { ... } # named wrapper — can contain any of the above
 
@@ -144,18 +214,30 @@ assessment "name" { ... } # named wrapper — can contain any of the above
 cargo test
 
 
+or, from the Makefile:
+
+make test
+
+
 ## What's next (not built yet)
 
 - Audit logging — an append-only record of every target touched and
   command run, for accountability on real engagements.
+- Certificate Transparency (crt.sh-style) subdomain discovery, replacing
+  or supplementing the current wordlist approach with real-world
+  coverage.
+- DNS zone transfer (AXFR) testing.
 - Dedicated TLS/SSL checks (certificate expiry, weak ciphers, protocol
   version) with their own syntax, beyond what's reachable via raw
   `nse_scripts`.
 - TLS support for `scan web` against HTTPS-only hosts.
 - A dry-run/explain mode to preview exactly what a script would do
   before it touches the network.
+- SNMP and SMB-specific information-disclosure checks.
 - UDP scanning, nmap timing templates, and a higher (but still
   deliberate) host-count cap for larger network ranges.
+- A larger OUI vendor table for `scan network` (currently ~24 curated
+  entries, not the full IEEE registry).
 - The `scan <ip>` one-line shorthand and `monitor network` / `when ...
   detected { }` event-driven blocks from the original design doc.
 - IPv6 support in the CIDR module.
