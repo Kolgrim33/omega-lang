@@ -1,5 +1,6 @@
 mod ast;
 mod backend;
+mod arp;
 mod dns;
 mod dnschecks;
 mod export;

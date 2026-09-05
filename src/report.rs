@@ -8,16 +8,10 @@ use crate::ip::{format_ipv4, Cidr};
 use std::fs;
 
 pub struct Finding {
-    pub severity: &'static str, // "high" | "medium" | "info"
+    pub severity: &'static str,
     pub text: String,
 }
 
-/// Classifies any finding line — from NSE scripts or web checks — by
-/// severity. Keyword-based and intentionally conservative: nmap's own
-/// output already flags real vulnerabilities with "VULNERABLE", and
-/// exposed-secret paths are named explicitly enough (.env, .git,
-/// credentials, private key) to catch reliably without a full CVE
-/// database.
 pub fn classify_finding(text: &str) -> Finding {
     let upper = text.to_uppercase();
     let severity = if upper.contains("VULNERABLE")
@@ -30,7 +24,12 @@ pub fn classify_finding(text: &str) -> Finding {
         || upper.contains("DATABASE")
     {
         "high"
-    } else if upper.contains("CVE-") || upper.contains("ADMIN") || upper.contains("PANEL") {
+    } else if upper.contains("CVE-")
+        || upper.contains("ADMIN")
+        || upper.contains("PANEL")
+        || upper.contains("MISSING SPF")
+        || upper.contains("MISSING DMARC")
+    {
         "medium"
     } else {
         "info"
@@ -46,6 +45,7 @@ pub fn write_json(
     target: Option<Cidr>,
     scope: Option<Cidr>,
     hosts: &[Host],
+    domain_findings: &[(String, Vec<String>)],
 ) -> Result<(), String> {
     let mut out = String::new();
     out.push_str("{\n");
@@ -76,6 +76,14 @@ pub fn write_json(
             Some(os) => out.push_str(&format!("      \"os\": \"{}\",\n", json_escape(os))),
             None => out.push_str("      \"os\": null,\n"),
         }
+        match &host.mac {
+            Some(mac) => out.push_str(&format!("      \"mac\": \"{}\",\n", json_escape(mac))),
+            None => out.push_str("      \"mac\": null,\n"),
+        }
+        match &host.vendor {
+            Some(vendor) => out.push_str(&format!("      \"vendor\": \"{}\",\n", json_escape(vendor))),
+            None => out.push_str("      \"vendor\": null,\n"),
+        }
         out.push_str("      \"findings\": [\n");
         for (j, line) in host.findings.iter().enumerate() {
             let f = classify_finding(line);
@@ -92,6 +100,27 @@ pub fn write_json(
             if i + 1 < hosts.len() { "," } else { "" }
         ));
     }
+    out.push_str("  ],\n");
+    out.push_str("  \"domains\": [\n");
+    for (i, (domain, findings)) in domain_findings.iter().enumerate() {
+        out.push_str("    {\n");
+        out.push_str(&format!("      \"domain\": \"{}\",\n", json_escape(domain)));
+        out.push_str("      \"findings\": [\n");
+        for (j, line) in findings.iter().enumerate() {
+            let f = classify_finding(line);
+            out.push_str(&format!(
+                "        {{ \"severity\": \"{}\", \"text\": \"{}\" }}{}\n",
+                f.severity,
+                json_escape(&f.text),
+                if j + 1 < findings.len() { "," } else { "" }
+            ));
+        }
+        out.push_str("      ]\n");
+        out.push_str(&format!(
+            "    }}{}\n",
+            if i + 1 < domain_findings.len() { "," } else { "" }
+        ));
+    }
     out.push_str("  ]\n");
     out.push_str("}\n");
 
@@ -103,6 +132,7 @@ pub fn write_html(
     target: Option<Cidr>,
     scope: Option<Cidr>,
     hosts: &[Host],
+    domain_findings: &[(String, Vec<String>)],
 ) -> Result<(), String> {
     let mut out = String::new();
     out.push_str("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>Omega Report</title>\n");
@@ -141,9 +171,34 @@ pub fn write_html(
         if let Some(os) = &host.os {
             out.push_str(&format!("<p><b>OS:</b> {}</p>\n", html_escape(os)));
         }
+        if let Some(mac) = &host.mac {
+            let vendor_str = host.vendor.as_deref().unwrap_or("unknown vendor");
+            out.push_str(&format!(
+                "<p><b>MAC:</b> {} ({})</p>\n",
+                html_escape(mac),
+                html_escape(vendor_str)
+            ));
+        }
         if !host.findings.is_empty() {
             out.push_str("<div>\n");
             for line in &host.findings {
+                let f = classify_finding(line);
+                out.push_str(&format!(
+                    "<div class=\"finding {}\">{}</div>\n",
+                    f.severity,
+                    html_escape(&f.text)
+                ));
+            }
+            out.push_str("</div>\n");
+        }
+    }
+
+    if !domain_findings.is_empty() {
+        out.push_str("<h1>Domains</h1>\n");
+        for (domain, findings) in domain_findings {
+            out.push_str(&format!("<h2>{}</h2>\n", html_escape(domain)));
+            out.push_str("<div>\n");
+            for line in findings {
                 let f = classify_finding(line);
                 out.push_str(&format!(
                     "<div class=\"finding {}\">{}</div>\n",

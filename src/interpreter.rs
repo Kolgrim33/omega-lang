@@ -1,3 +1,4 @@
+use crate::arp;
 use crate::ast::{
     DnsScanOptions, ExportDestination, ExportFormat, Program, ReportDestination, ReportFormat,
     ScanOptions, Stmt, WebScanOptions,
@@ -17,6 +18,8 @@ pub struct Host {
     pub services: Vec<(u16, String)>,
     pub os: Option<String>,
     pub findings: Vec<String>,
+    pub mac: Option<String>,
+    pub vendor: Option<String>,
 }
 
 pub struct Interpreter {
@@ -61,6 +64,7 @@ impl Interpreter {
             Stmt::ScanPorts { options } => self.exec_scan_ports(options),
             Stmt::ScanWeb { options } => self.exec_scan_web(options),
             Stmt::ScanDns { domain, options } => self.exec_scan_dns(domain, options),
+            Stmt::ScanNetwork => self.exec_scan_network(),
             Stmt::IdentifyServices => self.exec_identify_services(),
             Stmt::Report { destination } => match destination {
                 None => {
@@ -103,6 +107,8 @@ impl Interpreter {
                 services: Vec::new(),
                 os: None,
                 findings: Vec::new(),
+                mac: None,
+                vendor: None,
             });
         }
         if alive.is_empty() {
@@ -247,6 +253,77 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Reads the OS's own ARP cache after forcing a fresh connection
+    /// sweep across the target range, to build a device map (IP, MAC,
+    /// best-effort vendor) for the local network segment. Can both
+    /// enrich hosts already known from `discover hosts`, and surface
+    /// hosts that answered ARP but no port scan at all (e.g. a device
+    /// with every port closed/filtered but still present on the wire).
+    fn exec_scan_network(&mut self) -> Result<(), String> {
+        let target = self
+            .target
+            .ok_or_else(|| "scan network: no target set (use 'target <cidr>' first)".to_string())?;
+        println!("mapping local network (ARP)...");
+        println!(
+            "  note: ARP only sees devices on this local network segment; it cannot see across a router."
+        );
+
+        let mut in_scope_ips = Vec::new();
+        for ip in target.hosts() {
+            let ip_str = format_ipv4(ip);
+            if self.in_scope(ip) {
+                in_scope_ips.push(ip_str);
+            }
+        }
+        // Side effect only: this sweep's real purpose is forcing the OS
+        // to resolve ARP for each address, so the table read below
+        // actually has entries.
+        let _ = scan::discover_hosts(&in_scope_ips);
+
+        let arp_entries = arp::read_table();
+        let mut enriched = 0;
+        let mut found_new = 0;
+
+        for entry in arp_entries {
+            let ip_num = match crate::ip::parse_ipv4(&entry.ip) {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            if !self.in_scope(ip_num) {
+                continue; // ARP cache may hold entries outside our target range
+            }
+            let vendor = arp::vendor_lookup(&entry.mac).map(|v| v.to_string());
+
+            if let Some(host) = self.hosts.iter_mut().find(|h| h.ip == entry.ip) {
+                host.mac = Some(entry.mac.clone());
+                host.vendor = vendor.clone();
+                enriched += 1;
+            } else {
+                println!(
+                    "  found via ARP only (no port scan response): {} ({})",
+                    entry.ip,
+                    vendor.clone().unwrap_or_else(|| "unknown vendor".to_string())
+                );
+                self.hosts.push(Host {
+                    ip: entry.ip.clone(),
+                    open_ports: Vec::new(),
+                    services: Vec::new(),
+                    os: None,
+                    findings: Vec::new(),
+                    mac: Some(entry.mac.clone()),
+                    vendor,
+                });
+                found_new += 1;
+            }
+        }
+
+        println!(
+            "  {} host(s) enriched with MAC/vendor, {} new host(s) found via ARP alone",
+            enriched, found_new
+        );
+        Ok(())
+    }
+
     fn exec_identify_services(&mut self) -> Result<(), String> {
         println!("identifying services...");
         let scannable: Vec<&Host> = self.hosts.iter().filter(|h| !h.open_ports.is_empty()).collect();
@@ -376,6 +453,10 @@ impl Interpreter {
             }
             if let Some(os) = &host.os {
                 println!("  os: {}", os);
+            }
+            if let Some(mac) = &host.mac {
+                let vendor_str = host.vendor.as_deref().unwrap_or("unknown vendor");
+                println!("  mac: {} ({})", mac, vendor_str);
             }
             if !host.findings.is_empty() {
                 println!("  findings:");

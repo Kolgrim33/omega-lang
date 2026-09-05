@@ -7,6 +7,7 @@ pub enum Stmt {
     ScanPorts { options: ScanOptions },
     ScanWeb { options: WebScanOptions },
     ScanDns { domain: String, options: DnsScanOptions },
+    ScanNetwork,
     IdentifyServices,
     Report { destination: Option<ReportDestination> },
     ExportHosts { destination: ExportDestination },
