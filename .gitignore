@@ -1,2 +1,7 @@
 /target
 *.bak
+findings.json
+findings.html
+web_findings.json
+*.targets.txt
+*.targets.csv
