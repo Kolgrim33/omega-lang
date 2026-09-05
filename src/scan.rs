@@ -138,6 +138,8 @@ impl ProbeBackend for NmapBackend {
         }
         let output = Command::new("nmap")
             .arg("-O")
+            .arg("--host-timeout")
+            .arg("60s")
             .arg(ip)
             .output()
             .map_err(|e| format!("failed to run nmap -O: {}", e))?;
@@ -150,6 +152,10 @@ impl ProbeBackend for NmapBackend {
         let output = Command::new("nmap")
             .arg("--script")
             .arg(category)
+            .arg("--script-timeout")
+            .arg("60s")
+            .arg("--host-timeout")
+            .arg("120s")
             .arg(ip)
             .output()
             .map_err(|e| format!("failed to run nmap --script {}: {}", category, e))?;
