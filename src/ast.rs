@@ -6,8 +6,10 @@ pub enum Stmt {
     Discover,
     ScanPorts { options: ScanOptions },
     ScanWeb { options: WebScanOptions },
+    ScanDns { domain: String, options: DnsScanOptions },
     IdentifyServices,
     Report { destination: Option<ReportDestination> },
+    ExportHosts { destination: ExportDestination },
     Assessment { name: String, body: Vec<Stmt> },
 }
 #[derive(Debug, Clone, Default)]
@@ -22,9 +24,13 @@ pub struct ScanOptions {
 pub struct WebScanOptions {
     pub paths: bool,
     pub headers: bool,
-    /// Explicit port to check. None means "try common web ports among
-    /// this host's already-discovered open ports".
     pub port: Option<u16>,
+}
+#[derive(Debug, Clone, Default)]
+pub struct DnsScanOptions {
+    pub spf: bool,
+    pub dmarc: bool,
+    pub subdomains: bool,
 }
 #[derive(Debug, Clone)]
 pub enum ReportFormat {
@@ -35,5 +41,15 @@ pub enum ReportFormat {
 pub struct ReportDestination {
     pub path: String,
     pub format: ReportFormat,
+}
+#[derive(Debug, Clone)]
+pub enum ExportFormat {
+    Txt,
+    Csv,
+}
+#[derive(Debug, Clone)]
+pub struct ExportDestination {
+    pub path: String,
+    pub format: ExportFormat,
 }
 pub type Program = Vec<Stmt>;

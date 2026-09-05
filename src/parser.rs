@@ -1,4 +1,4 @@
-use crate::ast::{Program, ReportDestination, ReportFormat, ScanOptions, Stmt, WebScanOptions};
+use crate::ast::{DnsScanOptions, ExportDestination, ExportFormat, Program, ReportDestination, ReportFormat, ScanOptions, Stmt, WebScanOptions};
 use crate::lexer::Token;
 
 pub struct Parser {
@@ -58,8 +58,30 @@ impl Parser {
                         };
                         Ok(Stmt::ScanWeb { options })
                     }
-                    other => Err(format!("expected 'ports' or 'web' after 'scan', found '{}'", other)),
+                    "dns" => {
+                        let domain = self.expect_string("a domain name in quotes, e.g. \"example.com\"")?;
+                        let options = if self.check(&Token::LBrace) {
+                            self.parse_dns_block()?
+                        } else {
+                            DnsScanOptions::default()
+                        };
+                        Ok(Stmt::ScanDns { domain, options })
+                    }
+                    other => Err(format!("expected 'ports', 'web', or 'dns' after 'scan', found '{}'", other)),
                 }
+            }
+            "export" => {
+                self.expect_exact_word("hosts")?;
+                self.expect_exact_word("to")?;
+                let path = self.expect_string("an export file path in quotes, e.g. \"targets.txt\"")?;
+                let format = if path.ends_with(".txt") {
+                    ExportFormat::Txt
+                } else if path.ends_with(".csv") {
+                    ExportFormat::Csv
+                } else {
+                    return Err(format!("unsupported export format for '{}': expected .txt or .csv", path));
+                };
+                Ok(Stmt::ExportHosts { destination: ExportDestination { path, format } })
             }
             "identify" => {
                 self.expect_exact_word("services")?;
@@ -150,6 +172,23 @@ impl Parser {
                     opts.port = Some(port);
                 }
                 other => return Err(format!("unknown web scan option '{}'", other)),
+            }
+            self.skip_newlines();
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(opts)
+    }
+    fn parse_dns_block(&mut self) -> Result<DnsScanOptions, String> {
+        self.expect(&Token::LBrace)?;
+        self.skip_newlines();
+        let mut opts = DnsScanOptions::default();
+        while !self.check(&Token::RBrace) {
+            let key = self.expect_word("a dns scan option (spf, dmarc, subdomains)")?;
+            match key.as_str() {
+                "spf" => opts.spf = true,
+                "dmarc" => opts.dmarc = true,
+                "subdomains" => opts.subdomains = true,
+                other => return Err(format!("unknown dns scan option '{}'", other)),
             }
             self.skip_newlines();
         }

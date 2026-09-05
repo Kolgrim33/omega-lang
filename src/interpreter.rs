@@ -1,4 +1,9 @@
-use crate::ast::{Program, ReportDestination, ReportFormat, ScanOptions, Stmt, WebScanOptions};
+use crate::ast::{
+    DnsScanOptions, ExportDestination, ExportFormat, Program, ReportDestination, ReportFormat,
+    ScanOptions, Stmt, WebScanOptions,
+};
+use crate::dnschecks;
+use crate::export;
 use crate::ip::{format_ipv4, Cidr};
 use crate::parallel::parallel_map;
 use crate::report;
@@ -18,6 +23,7 @@ pub struct Interpreter {
     authorized_scope: Option<Cidr>,
     target: Option<Cidr>,
     hosts: Vec<Host>,
+    domain_findings: Vec<(String, Vec<String>)>,
 }
 
 const DEFAULT_WEB_PORTS: &[u16] = &[80, 8080, 8000, 8888, 443, 8443];
@@ -28,6 +34,7 @@ impl Interpreter {
             authorized_scope: None,
             target: None,
             hosts: Vec::new(),
+            domain_findings: Vec::new(),
         }
     }
     pub fn run(&mut self, program: &Program) -> Result<(), String> {
@@ -53,6 +60,7 @@ impl Interpreter {
             Stmt::Discover => self.exec_discover(),
             Stmt::ScanPorts { options } => self.exec_scan_ports(options),
             Stmt::ScanWeb { options } => self.exec_scan_web(options),
+            Stmt::ScanDns { domain, options } => self.exec_scan_dns(domain, options),
             Stmt::IdentifyServices => self.exec_identify_services(),
             Stmt::Report { destination } => match destination {
                 None => {
@@ -61,6 +69,7 @@ impl Interpreter {
                 }
                 Some(dest) => self.write_report(dest),
             },
+            Stmt::ExportHosts { destination } => self.export_hosts(destination),
             Stmt::Assessment { name, body } => {
                 println!("== assessment: {} ==", name);
                 for inner in body {
@@ -209,6 +218,35 @@ impl Interpreter {
         Ok(())
     }
 
+    fn exec_scan_dns(&mut self, domain: &str, options: &DnsScanOptions) -> Result<(), String> {
+        if self.authorized_scope.is_none() {
+            return Err(
+                "scan dns: no authorized_scope declared — set one before running DNS checks, even though DNS lookups aren't IP-scoped".to_string(),
+            );
+        }
+        println!("running DNS checks on {}...", domain);
+        let mut findings = Vec::new();
+        if options.spf {
+            findings.extend(dnschecks::check_spf(domain));
+        }
+        if options.dmarc {
+            findings.extend(dnschecks::check_dmarc(domain));
+        }
+        if options.subdomains {
+            findings.extend(dnschecks::enumerate_subdomains(domain));
+        }
+
+        if findings.is_empty() {
+            println!("  no findings");
+        } else {
+            for f in &findings {
+                println!("  {}", f);
+            }
+        }
+        self.domain_findings.push((domain.to_string(), findings));
+        Ok(())
+    }
+
     fn exec_identify_services(&mut self) -> Result<(), String> {
         println!("identifying services...");
         let scannable: Vec<&Host> = self.hosts.iter().filter(|h| !h.open_ports.is_empty()).collect();
@@ -275,14 +313,37 @@ impl Interpreter {
 
     fn write_report(&self, dest: &ReportDestination) -> Result<(), String> {
         match dest.format {
-            ReportFormat::Json => {
-                report::write_json(&dest.path, self.target, self.authorized_scope, &self.hosts)?
-            }
-            ReportFormat::Html => {
-                report::write_html(&dest.path, self.target, self.authorized_scope, &self.hosts)?
-            }
+            ReportFormat::Json => report::write_json(
+                &dest.path,
+                self.target,
+                self.authorized_scope,
+                &self.hosts,
+                &self.domain_findings,
+            )?,
+            ReportFormat::Html => report::write_html(
+                &dest.path,
+                self.target,
+                self.authorized_scope,
+                &self.hosts,
+                &self.domain_findings,
+            )?,
         }
         println!("report written to {}", dest.path);
+        Ok(())
+    }
+
+    fn export_hosts(&self, dest: &ExportDestination) -> Result<(), String> {
+        if self.hosts.is_empty() {
+            return Err(
+                "export hosts: no discovered hosts to export (run 'discover hosts' first)"
+                    .to_string(),
+            );
+        }
+        match dest.format {
+            ExportFormat::Txt => export::write_txt(&dest.path, &self.hosts)?,
+            ExportFormat::Csv => export::write_csv(&dest.path, &self.hosts)?,
+        }
+        println!("exported {} host(s) to {}", self.hosts.len(), dest.path);
         Ok(())
     }
 
@@ -320,6 +381,16 @@ impl Interpreter {
                 println!("  findings:");
                 for line in &host.findings {
                     println!("    {}", line);
+                }
+            }
+            println!();
+        }
+        if !self.domain_findings.is_empty() {
+            println!("domains checked:");
+            for (domain, findings) in &self.domain_findings {
+                println!("  {}", domain);
+                for f in findings {
+                    println!("    {}", f);
                 }
             }
             println!();
