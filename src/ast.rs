@@ -8,6 +8,7 @@ pub enum Stmt {
     ScanWeb { options: WebScanOptions },
     ScanDns { domain: String, options: DnsScanOptions },
     ScanNetwork,
+    ScanCreds,
     IdentifyServices,
     Report { destination: Option<ReportDestination> },
     ExportHosts { destination: ExportDestination },

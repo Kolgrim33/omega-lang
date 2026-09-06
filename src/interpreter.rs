@@ -1,4 +1,5 @@
 use crate::arp;
+use crate::credcheck;
 use crate::ast::{
     DnsScanOptions, ExportDestination, ExportFormat, Program, ReportDestination, ReportFormat,
     ScanOptions, Stmt, WebScanOptions,
@@ -65,6 +66,7 @@ impl Interpreter {
             Stmt::ScanWeb { options } => self.exec_scan_web(options),
             Stmt::ScanDns { domain, options } => self.exec_scan_dns(domain, options),
             Stmt::ScanNetwork => self.exec_scan_network(),
+            Stmt::ScanCreds => self.exec_scan_creds(),
             Stmt::IdentifyServices => self.exec_identify_services(),
             Stmt::Report { destination } => match destination {
                 None => {
@@ -321,6 +323,54 @@ impl Interpreter {
             "  {} host(s) enriched with MAC/vendor, {} new host(s) found via ARP alone",
             enriched, found_new
         );
+        Ok(())
+    }
+
+    /// Tests a small, curated list of factory-default credentials
+    /// against services already discovered open: FTP, Telnet, and HTTP
+    /// Basic Auth. Stops at the first hit per service. Deliberately does
+    /// not include SSH — see credcheck.rs for why.
+    fn exec_scan_creds(&mut self) -> Result<(), String> {
+        if self.hosts.is_empty() {
+            return Err(
+                "scan creds: no discovered hosts (run 'discover hosts' first)".to_string(),
+            );
+        }
+        println!("checking default credentials (small curated list, stops at first hit per service)...");
+
+        let scope = self.authorized_scope;
+        let results: Vec<(String, Vec<String>)> = parallel_map(&self.hosts, |host| {
+            let ip = host.ip.clone();
+            let ip_num = crate::ip::parse_ipv4(&ip).unwrap_or(0);
+            if !in_scope(scope, ip_num) {
+                eprintln!("ERROR: target {} is outside authorized scope.", ip);
+                return (ip, Vec::new());
+            }
+            let mut findings = Vec::new();
+            if host.open_ports.contains(&21) {
+                findings.extend(credcheck::check_ftp(&ip, 21));
+            }
+            if host.open_ports.contains(&23) {
+                findings.extend(credcheck::check_telnet(&ip, 23));
+            }
+            for &port in &host.open_ports {
+                if DEFAULT_WEB_PORTS.contains(&port) {
+                    findings.extend(credcheck::check_http_basic_auth(&ip, port));
+                }
+            }
+            (ip, findings)
+        });
+
+        for (ip, findings) in results {
+            if findings.is_empty() {
+                println!("  {}: no default credentials found", ip);
+            } else {
+                println!("  {}: {} finding(s)", ip, findings.len());
+            }
+            if let Some(host) = self.hosts.iter_mut().find(|h| h.ip == ip) {
+                host.findings.extend(findings);
+            }
+        }
         Ok(())
     }
 

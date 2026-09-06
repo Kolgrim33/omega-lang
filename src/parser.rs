@@ -68,7 +68,8 @@ impl Parser {
                         Ok(Stmt::ScanDns { domain, options })
                     }
                     "network" => Ok(Stmt::ScanNetwork),
-                    other => Err(format!("expected 'ports', 'web', 'dns', or 'network' after 'scan', found '{}'", other)),
+                    "creds" => Ok(Stmt::ScanCreds),
+                    other => Err(format!("expected 'ports', 'web', 'dns', 'network', or 'creds' after 'scan', found '{}'", other)),
                 }
             }
             "export" => {
