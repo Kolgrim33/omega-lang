@@ -10,6 +10,8 @@ target 192.168.1.0/24
 discover hosts
 scan ports { services os_detect nse_scripts "vuln" }
 scan web { paths headers }
+scan tls
+scan creds
 scan network
 scan dns "example.com" { spf dmarc subdomains }
 export hosts to "targets.txt"
@@ -37,7 +39,8 @@ This is a real tree-walking interpreter, not a mockup:
   `.omega`/`.omg` source into an AST covering `target`,
   `authorized_scope`, `discover [hosts]`, `scan ports { ... }`,
   `scan web { ... }`, `scan dns "..." { ... }`, `scan network`,
-  `identify services`, `report [to "..."]`, `export hosts to "..."`, and
+  `scan creds`, `scan tls { ... }`, `identify services`,
+  `report [to "..."]`, `export hosts to "..."`, and
   `assessment "name" { ... }` blocks.
 - **Scope enforcement** (`src/interpreter.rs`) — `authorized_scope` (or the
   first `target`, implicitly) is checked before every host is touched. A
@@ -76,8 +79,35 @@ This is a real tree-walking interpreter, not a mockup:
   - runs against a host's already-discovered open web ports
     (80/8080/8000/8888/443/8443) or an explicit `port <n>`. HTTPS ports
     are currently probed as plain HTTP — TLS support isn't implemented
-    yet, and the report says so explicitly rather than silently
-    misreporting an HTTPS-only host.
+    for actually fetching content (see `scan tls` below for what TLS
+    support does exist), and the report says so explicitly rather than
+    silently misreporting an HTTPS-only host.
+- **TLS certificate and protocol checks** (`src/tlscheck.rs`) — `scan
+  tls` performs a partial, non-cryptographic TLS handshake: it sends a
+  ClientHello, reads the plaintext ServerHello and Certificate messages
+  (unencrypted for TLS 1.2 and earlier), then disconnects — no key
+  exchange, encryption, or signature verification is performed, the same
+  crypto-avoidance boundary as SSH being excluded from `scan creds`.
+  - extracts certificate expiry, subject, and issuer via a simplified
+    hand-rolled X.509 DER parser;
+  - separately probes whether the server still accepts TLS 1.0/1.1, and
+    whether it accepts a curated list of deliberately weak/broken cipher
+    suites (NULL, EXPORT, RC4, DES, 3DES);
+  - known limitation: TLS 1.3's Certificate message is itself encrypted,
+    so certificate details aren't readable this way on 1.3-only servers
+    (only the negotiated version/cipher are visible). This does **not**
+    let `scan web` fetch real HTTPS content — that needs a full,
+    encrypting TLS client, a separate and much larger feature.
+- **Default credential checks** (`src/credcheck.rs`) — `scan creds` tests
+  a small, curated list of well-known factory-default logins (~10 pairs,
+  not a wordlist) against services already discovered open: FTP, Telnet,
+  and HTTP Basic Auth. Stops at the first hit per service; HTTP checks
+  only run if the baseline unauthenticated request is already rejected
+  (401). SSH is deliberately excluded — a correct client needs real
+  cryptographic key exchange that can't be responsibly hand-rolled
+  without a dedicated crypto library. Telnet support is explicitly
+  best-effort/heuristic (IAC sequences are stripped rather than properly
+  negotiated, and success is guessed from prompt text).
 - **DNS and email security checks** (`src/dns.rs`, `src/dnschecks.rs`) —
   `scan dns "domain" { spf dmarc subdomains }`:
   - a hand-rolled, zero-dependency DNS client (raw UDP, RFC 1035 wire
@@ -106,19 +136,29 @@ This is a real tree-walking interpreter, not a mockup:
   destination prints to stdout as before; `report to "findings.json"` or
   `report to "findings.html"` write a hand-rolled structured report (no
   serde/templating dependency), including host MAC/vendor and
-  domain-level DNS findings. Every finding — from NSE scripts or web
-  checks — is classified `high`/`medium`/`info` by severity so results
-  are usable at scale, not just a wall of raw text.
+  domain-level DNS findings. Every finding — from NSE scripts, web
+  checks, TLS checks, or credential checks — is classified
+  `high`/`medium`/`info` by severity so results are usable at scale, not
+  just a wall of raw text.
 - **Target-list export for tool chaining** (`src/export.rs`) — `export
   hosts to "targets.txt"` (plain `ip:port` lines) or `.csv` (`ip,port,
   service` columns), so recon results can feed into another tool instead
   of Omega being a closed loop.
-- **Parallel execution** (`src/parallel.rs`) — hosts, ports, and web
-  checks are probed concurrently (bounded thread pool built on
-  `std::thread::scope`, no external crates), so `discover hosts` on a
-  /24 doesn't mean 254 sequential connect timeouts.
+- **Parallel execution** (`src/parallel.rs`) — hosts, ports, web, TLS,
+  and credential checks are all probed concurrently (bounded thread pool
+  built on `std::thread::scope`, no external crates), so `discover
+  hosts` on a /24 doesn't mean 254 sequential connect timeouts.
 - **CIDR handling** (`src/ip.rs`) — hand-rolled IPv4/CIDR parsing and host
   iteration, capped at 256 hosts per target as a safety limit.
+
+## A note on scope for active checks
+
+`scan creds` attempts real logins (even with a tiny, well-known
+credential list) and `scan tls`/`scan web`/`scan network` all actively
+touch real hosts. `authorized_scope` enforcement covers all of them, but
+that enforcement is only as good as the scope you actually declare —
+only run these against systems you own or have explicit authorization to
+test.
 
 ## Building from source
 
@@ -167,6 +207,8 @@ omega myscript.omg
 - `examples/web_scan.omg` — HTTP vulnerability scanning (`scan web`).
 - `examples/network_scan.omg` — ARP-based local network discovery
   (`scan network`).
+- `examples/creds_test.omg` — default credential checking (`scan
+  creds`).
 
 ## Full syntax reference
 
@@ -188,6 +230,14 @@ paths # check curated sensitive-path list
 headers # check for missing security headers
 port <n> # optional explicit port
 }
+
+scan tls {
+port <n> # optional explicit port
+} # certificate expiry/subject/issuer,
+# legacy protocol + weak cipher checks
+
+scan creds # default-credential checks:
+# FTP, Telnet, HTTP Basic Auth
 
 scan dns "domain.com" {
 spf # check for SPF TXT record
@@ -222,18 +272,22 @@ make test
 ## What's next (not built yet)
 
 - Audit logging — an append-only record of every target touched and
-  command run, for accountability on real engagements.
+  command run, for accountability on real engagements. Still the single
+  highest-priority missing piece, especially now that `scan creds`
+  actively attempts logins.
+- A full, encrypting TLS client so `scan web` can fetch real HTTPS
+  content (`scan tls` only reads certificate/protocol metadata from a
+  partial, unencrypted handshake).
 - Certificate Transparency (crt.sh-style) subdomain discovery, replacing
   or supplementing the current wordlist approach with real-world
   coverage.
 - DNS zone transfer (AXFR) testing.
-- Dedicated TLS/SSL checks (certificate expiry, weak ciphers, protocol
-  version) with their own syntax, beyond what's reachable via raw
-  `nse_scripts`.
-- TLS support for `scan web` against HTTPS-only hosts.
 - A dry-run/explain mode to preview exactly what a script would do
   before it touches the network.
 - SNMP and SMB-specific information-disclosure checks.
+- CVE correlation for detected service versions.
+- An attack-surface summary section in reports, ranking findings across
+  the whole engagement rather than just per-host.
 - UDP scanning, nmap timing templates, and a higher (but still
   deliberate) host-count cap for larger network ranges.
 - A larger OUI vendor table for `scan network` (currently ~24 curated
