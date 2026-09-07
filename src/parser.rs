@@ -1,4 +1,4 @@
-use crate::ast::{DnsScanOptions, ExportDestination, ExportFormat, Program, ReportDestination, ReportFormat, ScanOptions, Stmt, WebScanOptions};
+use crate::ast::{DnsScanOptions, ExportDestination, ExportFormat, Program, ReportDestination, ReportFormat, ScanOptions, Stmt, TlsScanOptions, WebScanOptions};
 use crate::lexer::Token;
 
 pub struct Parser {
@@ -69,7 +69,15 @@ impl Parser {
                     }
                     "network" => Ok(Stmt::ScanNetwork),
                     "creds" => Ok(Stmt::ScanCreds),
-                    other => Err(format!("expected 'ports', 'web', 'dns', 'network', or 'creds' after 'scan', found '{}'", other)),
+                    "tls" => {
+                        let options = if self.check(&Token::LBrace) {
+                            self.parse_tls_block()?
+                        } else {
+                            TlsScanOptions::default()
+                        };
+                        Ok(Stmt::ScanTls { options })
+                    }
+                    other => Err(format!("expected 'ports', 'web', 'dns', 'network', 'creds', or 'tls' after 'scan', found '{}'", other)),
                 }
             }
             "export" => {
@@ -174,6 +182,27 @@ impl Parser {
                     opts.port = Some(port);
                 }
                 other => return Err(format!("unknown web scan option '{}'", other)),
+            }
+            self.skip_newlines();
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(opts)
+    }
+    fn parse_tls_block(&mut self) -> Result<TlsScanOptions, String> {
+        self.expect(&Token::LBrace)?;
+        self.skip_newlines();
+        let mut opts = TlsScanOptions::default();
+        while !self.check(&Token::RBrace) {
+            let key = self.expect_word("a tls scan option (port)")?;
+            match key.as_str() {
+                "port" => {
+                    let raw = self.expect_word("a port number")?;
+                    let port: u16 = raw
+                        .parse()
+                        .map_err(|_| format!("invalid port '{}'", raw))?;
+                    opts.port = Some(port);
+                }
+                other => return Err(format!("unknown tls scan option '{}'", other)),
             }
             self.skip_newlines();
         }

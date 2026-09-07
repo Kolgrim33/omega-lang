@@ -13,6 +13,7 @@ mod parallel;
 mod parser;
 mod report;
 mod scan;
+mod tlscheck;
 mod webchecks;
 
 use interpreter::Interpreter;

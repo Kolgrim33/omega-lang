@@ -2,8 +2,9 @@ use crate::arp;
 use crate::credcheck;
 use crate::ast::{
     DnsScanOptions, ExportDestination, ExportFormat, Program, ReportDestination, ReportFormat,
-    ScanOptions, Stmt, WebScanOptions,
+    ScanOptions, Stmt, TlsScanOptions, WebScanOptions,
 };
+use crate::tlscheck;
 use crate::dnschecks;
 use crate::export;
 use crate::ip::{format_ipv4, Cidr};
@@ -31,6 +32,7 @@ pub struct Interpreter {
 }
 
 const DEFAULT_WEB_PORTS: &[u16] = &[80, 8080, 8000, 8888, 443, 8443];
+const TLS_PORTS: &[u16] = &[443, 8443, 993, 995, 465, 636];
 
 impl Interpreter {
     pub fn new() -> Self {
@@ -67,6 +69,7 @@ impl Interpreter {
             Stmt::ScanDns { domain, options } => self.exec_scan_dns(domain, options),
             Stmt::ScanNetwork => self.exec_scan_network(),
             Stmt::ScanCreds => self.exec_scan_creds(),
+            Stmt::ScanTls { options } => self.exec_scan_tls(options),
             Stmt::IdentifyServices => self.exec_identify_services(),
             Stmt::Report { destination } => match destination {
                 None => {
@@ -192,7 +195,7 @@ impl Interpreter {
             .collect();
 
         if jobs.is_empty() {
-            println!("  no web ports to check (run 'scan ports' first, or specify 'port <n>' explicitly)");
+            println!(" no web ports to check (run 'scan ports' first, or specify 'port <n>' explicitly)");
             return Ok(());
         }
 
@@ -205,7 +208,7 @@ impl Interpreter {
             let mut findings = webchecks::run_checks(ip, *port, check_paths, check_headers);
             if (*port == 443 || *port == 8443) && findings.iter().any(|f| f.contains("failed")) {
                 findings.push(
-                    "note: HTTPS/TLS web checks are not yet supported by Omega — this port was probed as plain HTTP"
+                    "note: HTTPS/TLS web checks are not yet supported by Omega ,this port was probed as plain HTTP"
                         .to_string(),
                 );
             }
@@ -366,6 +369,62 @@ impl Interpreter {
                 println!("  {}: no default credentials found", ip);
             } else {
                 println!("  {}: {} finding(s)", ip, findings.len());
+            }
+            if let Some(host) = self.hosts.iter_mut().find(|h| h.ip == ip) {
+                host.findings.extend(findings);
+            }
+        }
+        Ok(())
+    }
+
+    /// Certificate and protocol/cipher checks — no cryptography, see
+    /// tlscheck.rs for exactly what this can and can't see.
+    fn exec_scan_tls(&mut self, options: &TlsScanOptions) -> Result<(), String> {
+        if self.hosts.is_empty() {
+            return Err("scan tls: no discovered hosts (run 'discover hosts' first)".to_string());
+        }
+        println!("checking TLS certificates and protocol support...");
+
+        let scope = self.authorized_scope;
+        let explicit_port = options.port;
+
+        let jobs: Vec<(String, u16)> = self
+            .hosts
+            .iter()
+            .flat_map(|h| {
+                let ports: Vec<u16> = match explicit_port {
+                    Some(p) => vec![p],
+                    None => h
+                        .open_ports
+                        .iter()
+                        .copied()
+                        .filter(|p| TLS_PORTS.contains(p))
+                        .collect(),
+                };
+                let ip = h.ip.clone();
+                ports.into_iter().map(move |p| (ip.clone(), p))
+            })
+            .collect();
+
+        if jobs.is_empty() {
+            println!("  no TLS ports to check (run 'scan ports' first, or specify 'port <n>' explicitly)");
+            return Ok(());
+        }
+
+        let results: Vec<(String, u16, Vec<String>)> = parallel_map(&jobs, |(ip, port)| {
+            let ip_num = crate::ip::parse_ipv4(ip).unwrap_or(0);
+            if !in_scope(scope, ip_num) {
+                eprintln!("ERROR: target {} is outside authorized scope.", ip);
+                return (ip.clone(), *port, Vec::new());
+            }
+            (ip.clone(), *port, tlscheck::check_tls(ip, *port))
+        });
+
+        for (ip, port, findings) in results {
+            if findings.is_empty() {
+                println!("  {}:{}: no findings", ip, port);
+            } else {
+                println!("  {}:{}: {} finding(s)", ip, port, findings.len());
             }
             if let Some(host) = self.hosts.iter_mut().find(|h| h.ip == ip) {
                 host.findings.extend(findings);

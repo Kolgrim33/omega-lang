@@ -9,6 +9,7 @@ pub enum Stmt {
     ScanDns { domain: String, options: DnsScanOptions },
     ScanNetwork,
     ScanCreds,
+    ScanTls { options: TlsScanOptions },
     IdentifyServices,
     Report { destination: Option<ReportDestination> },
     ExportHosts { destination: ExportDestination },
@@ -26,6 +27,10 @@ pub struct ScanOptions {
 pub struct WebScanOptions {
     pub paths: bool,
     pub headers: bool,
+    pub port: Option<u16>,
+}
+#[derive(Debug, Clone, Default)]
+pub struct TlsScanOptions {
     pub port: Option<u16>,
 }
 #[derive(Debug, Clone, Default)]
