@@ -1,16 +1,17 @@
 use crate::arp;
-use crate::credcheck;
 use crate::ast::{
     DnsScanOptions, ExportDestination, ExportFormat, Program, ReportDestination, ReportFormat,
     ScanOptions, Stmt, TlsScanOptions, WebScanOptions,
 };
-use crate::tlscheck;
+use crate::audit;
+use crate::credcheck;
 use crate::dnschecks;
 use crate::export;
 use crate::ip::{format_ipv4, Cidr};
 use crate::parallel::parallel_map;
 use crate::report;
 use crate::scan;
+use crate::tlscheck;
 use crate::webchecks;
 
 #[derive(Debug, Clone)]
@@ -29,6 +30,7 @@ pub struct Interpreter {
     target: Option<Cidr>,
     hosts: Vec<Host>,
     domain_findings: Vec<(String, Vec<String>)>,
+    audit: Option<audit::AuditLog>,
 }
 
 const DEFAULT_WEB_PORTS: &[u16] = &[80, 8080, 8000, 8888, 443, 8443];
@@ -41,6 +43,7 @@ impl Interpreter {
             target: None,
             hosts: Vec::new(),
             domain_findings: Vec::new(),
+            audit: None,
         }
     }
     pub fn run(&mut self, program: &Program) -> Result<(), String> {
@@ -49,8 +52,44 @@ impl Interpreter {
         }
         Ok(())
     }
-    fn exec(&mut self, stmt: &Stmt) -> Result<(), String> {
+
+    /// A short (action, detail) description of a statement, used for
+    /// audit log entries. Kept separate from execution so the audit
+    /// record can be written regardless of which branch below actually
+    /// ran.
+    fn describe(stmt: &Stmt) -> (String, String) {
         match stmt {
+            Stmt::Target(addr) => ("target".to_string(), addr.clone()),
+            Stmt::AuthorizedScope(addr) => ("authorized_scope".to_string(), addr.clone()),
+            Stmt::Discover => ("discover".to_string(), String::new()),
+            Stmt::ScanPorts { options } => ("scan_ports".to_string(), format!("{:?}", options)),
+            Stmt::ScanWeb { options } => ("scan_web".to_string(), format!("{:?}", options)),
+            Stmt::ScanDns { domain, options } => {
+                ("scan_dns".to_string(), format!("{} {:?}", domain, options))
+            }
+            Stmt::ScanNetwork => ("scan_network".to_string(), String::new()),
+            Stmt::ScanCreds => ("scan_creds".to_string(), String::new()),
+            Stmt::ScanTls { options } => ("scan_tls".to_string(), format!("{:?}", options)),
+            Stmt::IdentifyServices => ("identify_services".to_string(), String::new()),
+            Stmt::Report { destination } => (
+                "report".to_string(),
+                destination
+                    .as_ref()
+                    .map(|d| d.path.clone())
+                    .unwrap_or_else(|| "stdout".to_string()),
+            ),
+            Stmt::ExportHosts { destination } => {
+                ("export_hosts".to_string(), destination.path.clone())
+            }
+            Stmt::Assessment { name, .. } => ("assessment".to_string(), name.clone()),
+            Stmt::AuditLog(path) => ("audit_log".to_string(), path.clone()),
+        }
+    }
+
+    fn exec(&mut self, stmt: &Stmt) -> Result<(), String> {
+        let (action, detail) = Self::describe(stmt);
+
+        let result = match stmt {
             Stmt::Target(addr) => {
                 let cidr = Cidr::parse(addr)?;
                 if self.authorized_scope.is_none() {
@@ -79,15 +118,37 @@ impl Interpreter {
                 Some(dest) => self.write_report(dest),
             },
             Stmt::ExportHosts { destination } => self.export_hosts(destination),
-            Stmt::Assessment { name, body } => {
-                println!("== assessment: {} ==", name);
+            Stmt::Assessment { name: _, body } => {
+                println!("== assessment: {} ==", Self::describe(stmt).1);
+                let mut inner_result = Ok(());
                 for inner in body {
-                    self.exec(inner)?;
+                    inner_result = self.exec(inner);
+                    if inner_result.is_err() {
+                        break;
+                    }
                 }
-                Ok(())
+                inner_result
             }
+            Stmt::AuditLog(path) => match audit::AuditLog::open(path) {
+                Ok(log) => {
+                    self.audit = Some(log);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            },
+        };
+
+        if let Some(log) = &mut self.audit {
+            let outcome = match &result {
+                Ok(()) => "ok".to_string(),
+                Err(e) => format!("error: {}", e),
+            };
+            log.write_entry(&action, &detail, &outcome);
         }
+
+        result
     }
+
     fn exec_discover(&mut self) -> Result<(), String> {
         let target = self
             .target
@@ -195,7 +256,7 @@ impl Interpreter {
             .collect();
 
         if jobs.is_empty() {
-            println!(" no web ports to check (run 'scan ports' first, or specify 'port <n>' explicitly)");
+            println!("  no web ports to check (run 'scan ports' first, or specify 'port <n>' explicitly)");
             return Ok(());
         }
 
@@ -208,7 +269,7 @@ impl Interpreter {
             let mut findings = webchecks::run_checks(ip, *port, check_paths, check_headers);
             if (*port == 443 || *port == 8443) && findings.iter().any(|f| f.contains("failed")) {
                 findings.push(
-                    "note: HTTPS/TLS web checks are not yet supported by Omega ,this port was probed as plain HTTP"
+                    "note: HTTPS/TLS web checks are not yet supported by Omega — this port was probed as plain HTTP"
                         .to_string(),
                 );
             }
@@ -258,12 +319,6 @@ impl Interpreter {
         Ok(())
     }
 
-    /// Reads the OS's own ARP cache after forcing a fresh connection
-    /// sweep across the target range, to build a device map (IP, MAC,
-    /// best-effort vendor) for the local network segment. Can both
-    /// enrich hosts already known from `discover hosts`, and surface
-    /// hosts that answered ARP but no port scan at all (e.g. a device
-    /// with every port closed/filtered but still present on the wire).
     fn exec_scan_network(&mut self) -> Result<(), String> {
         let target = self
             .target
@@ -280,9 +335,6 @@ impl Interpreter {
                 in_scope_ips.push(ip_str);
             }
         }
-        // Side effect only: this sweep's real purpose is forcing the OS
-        // to resolve ARP for each address, so the table read below
-        // actually has entries.
         let _ = scan::discover_hosts(&in_scope_ips);
 
         let arp_entries = arp::read_table();
@@ -295,7 +347,7 @@ impl Interpreter {
                 Err(_) => continue,
             };
             if !self.in_scope(ip_num) {
-                continue; // ARP cache may hold entries outside our target range
+                continue;
             }
             let vendor = arp::vendor_lookup(&entry.mac).map(|v| v.to_string());
 
@@ -329,10 +381,6 @@ impl Interpreter {
         Ok(())
     }
 
-    /// Tests a small, curated list of factory-default credentials
-    /// against services already discovered open: FTP, Telnet, and HTTP
-    /// Basic Auth. Stops at the first hit per service. Deliberately does
-    /// not include SSH — see credcheck.rs for why.
     fn exec_scan_creds(&mut self) -> Result<(), String> {
         if self.hosts.is_empty() {
             return Err(
@@ -377,8 +425,6 @@ impl Interpreter {
         Ok(())
     }
 
-    /// Certificate and protocol/cipher checks — no cryptography, see
-    /// tlscheck.rs for exactly what this can and can't see.
     fn exec_scan_tls(&mut self, options: &TlsScanOptions) -> Result<(), String> {
         if self.hosts.is_empty() {
             return Err("scan tls: no discovered hosts (run 'discover hosts' first)".to_string());

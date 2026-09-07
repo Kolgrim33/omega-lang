@@ -14,6 +14,7 @@ pub enum Stmt {
     Report { destination: Option<ReportDestination> },
     ExportHosts { destination: ExportDestination },
     Assessment { name: String, body: Vec<Stmt> },
+    AuditLog(String),
 }
 #[derive(Debug, Clone, Default)]
 pub struct ScanOptions {

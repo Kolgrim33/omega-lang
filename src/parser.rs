@@ -80,6 +80,10 @@ impl Parser {
                     other => Err(format!("expected 'ports', 'web', 'dns', 'network', 'creds', or 'tls' after 'scan', found '{}'", other)),
                 }
             }
+            "audit_log" => {
+                let path = self.expect_string("an audit log file path in quotes, e.g. \"audit.jsonl\"")?;
+                Ok(Stmt::AuditLog(path))
+            }
             "export" => {
                 self.expect_exact_word("hosts")?;
                 self.expect_exact_word("to")?;

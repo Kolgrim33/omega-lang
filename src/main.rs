@@ -2,6 +2,7 @@ mod ast;
 mod backend;
 mod credcheck;
 mod arp;
+mod audit;
 mod dns;
 mod dnschecks;
 mod export;
