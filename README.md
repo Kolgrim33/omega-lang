@@ -7,6 +7,7 @@ automation. Instead of writing Python calls into scanning libraries, you
 describe the security operation you want:
 
 target 192.168.1.0/24
+audit_log "engagement.jsonl"
 discover hosts
 scan ports { services os_detect nse_scripts "vuln" }
 scan web { paths headers }
@@ -40,7 +41,7 @@ This is a real tree-walking interpreter, not a mockup:
   `authorized_scope`, `discover [hosts]`, `scan ports { ... }`,
   `scan web { ... }`, `scan dns "..." { ... }`, `scan network`,
   `scan creds`, `scan tls { ... }`, `identify services`,
-  `report [to "..."]`, `export hosts to "..."`, and
+  `report [to "..."]`, `export hosts to "..."`, `audit_log "..."`, and
   `assessment "name" { ... }` blocks.
 - **Scope enforcement** (`src/interpreter.rs`) — `authorized_scope` (or the
   first `target`, implicitly) is checked before every host is touched. A
@@ -132,6 +133,17 @@ This is a real tree-walking interpreter, not a mockup:
   at all. Known limitations: only sees the local network segment (not
   across a router), and ARP entries can go stale between the sweep and
   the read, so not every host is guaranteed a MAC on a given run.
+- **Audit logging** (`src/audit.rs`) — `audit_log "path.jsonl"`, placed
+  anywhere in a script, opens that file (append mode) and logs every
+  subsequent statement as one JSON Lines entry: timestamp, action (e.g.
+  `scan_ports`, `scan_creds`), a brief detail string, and outcome (`ok`
+  or the error message). This is the accountability layer for real
+  engagements — proof of exactly what was attempted and when, especially
+  now that `scan creds`/`scan tls`/`scan network` are all actively
+  touching real hosts. Known limitation: logs at the per-statement level,
+  not per-host-within-a-scan (e.g. it won't show which specific host in
+  a /24 was out of scope, or which credential pair succeeded) — that
+  detail still lives in stdout/report output.
 - **Structured reporting** (`src/report.rs`) — `report` with no
   destination prints to stdout as before; `report to "findings.json"` or
   `report to "findings.html"` write a hand-rolled structured report (no
@@ -256,6 +268,9 @@ report to "findings.html" # write styled HTML
 export hosts to "targets.txt" # plain ip:port lines
 export hosts to "targets.csv" # ip,port,service columns
 
+audit_log "path.jsonl" # append-only, per-statement log of
+# every action and its outcome
+
 assessment "name" { ... } # named wrapper — can contain any of the above
 
 
@@ -271,10 +286,9 @@ make test
 
 ## What's next (not built yet)
 
-- Audit logging — an append-only record of every target touched and
-  command run, for accountability on real engagements. Still the single
-  highest-priority missing piece, especially now that `scan creds`
-  actively attempts logins.
+- Per-host detail in audit logging (currently logs per-statement only,
+  not e.g. which specific host in a range was out of scope, or which
+  credential pair succeeded).
 - A full, encrypting TLS client so `scan web` can fetch real HTTPS
   content (`scan tls` only reads certificate/protocol metadata from a
   partial, unencrypted handshake).
