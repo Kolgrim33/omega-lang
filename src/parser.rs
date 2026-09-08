@@ -1,4 +1,4 @@
-use crate::ast::{DnsScanOptions, ExportDestination, ExportFormat, Program, ReportDestination, ReportFormat, ScanOptions, Stmt, TlsScanOptions, WebScanOptions};
+use crate::ast::{Condition, DnsScanOptions, ExportDestination, ExportFormat, Program, ReportDestination, ReportFormat, ScanOptions, Stmt, TlsScanOptions, WebScanOptions};
 use crate::lexer::Token;
 
 pub struct Parser {
@@ -83,6 +83,17 @@ impl Parser {
             "audit_log" => {
                 let path = self.expect_string("an audit log file path in quotes, e.g. \"audit.jsonl\"")?;
                 Ok(Stmt::AuditLog(path))
+            }
+            "for" => {
+                self.expect_exact_word("each")?;
+                self.expect_exact_word("host")?;
+                let body = self.parse_block()?;
+                Ok(Stmt::ForEachHost { body })
+            }
+            "if" => {
+                let condition = self.parse_condition()?;
+                let body = self.parse_block()?;
+                Ok(Stmt::If { condition, body })
             }
             "export" => {
                 self.expect_exact_word("hosts")?;
@@ -229,6 +240,36 @@ impl Parser {
         }
         self.expect(&Token::RBrace)?;
         Ok(opts)
+    }
+    fn parse_block(&mut self) -> Result<Vec<Stmt>, String> {
+        self.expect(&Token::LBrace)?;
+        self.skip_newlines();
+        let mut body = Vec::new();
+        while !self.check(&Token::RBrace) {
+            body.push(self.parse_stmt()?);
+            self.skip_newlines();
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(body)
+    }
+    fn parse_condition(&mut self) -> Result<Condition, String> {
+        let key = self.expect_word("a condition (port, os)")?;
+        match key.as_str() {
+            "port" => {
+                let raw = self.expect_word("a port number")?;
+                let port: u16 = raw
+                    .parse()
+                    .map_err(|_| format!("invalid port '{}'", raw))?;
+                self.expect_exact_word("open")?;
+                Ok(Condition::PortOpen(port))
+            }
+            "os" => {
+                self.expect_exact_word("contains")?;
+                let text = self.expect_string("text to match in the OS string")?;
+                Ok(Condition::OsContains(text))
+            }
+            other => Err(format!("unknown condition '{}'", other)),
+        }
     }
     // --- token helpers ---
 

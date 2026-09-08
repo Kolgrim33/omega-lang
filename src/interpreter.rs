@@ -1,7 +1,7 @@
 use crate::arp;
 use crate::ast::{
-    DnsScanOptions, ExportDestination, ExportFormat, Program, ReportDestination, ReportFormat,
-    ScanOptions, Stmt, TlsScanOptions, WebScanOptions,
+    Condition, DnsScanOptions, ExportDestination, ExportFormat, Program, ReportDestination,
+    ReportFormat, ScanOptions, Stmt, TlsScanOptions, WebScanOptions,
 };
 use crate::audit;
 use crate::credcheck;
@@ -83,6 +83,8 @@ impl Interpreter {
             }
             Stmt::Assessment { name, .. } => ("assessment".to_string(), name.clone()),
             Stmt::AuditLog(path) => ("audit_log".to_string(), path.clone()),
+            Stmt::ForEachHost { .. } => ("for_each_host".to_string(), String::new()),
+            Stmt::If { condition, .. } => ("if".to_string(), format!("{:?}", condition)),
         }
     }
 
@@ -136,6 +138,8 @@ impl Interpreter {
                 }
                 Err(e) => Err(e),
             },
+            Stmt::ForEachHost { body } => self.exec_for_each_host(body),
+            Stmt::If { condition, body } => self.exec_if(condition, body),
         };
 
         if let Some(log) = &mut self.audit {
@@ -147,6 +151,59 @@ impl Interpreter {
         }
 
         result
+    }
+
+    /// Narrows self.hosts to one host per iteration (so every existing
+    /// scan_* method automatically operates on just that host, with zero
+    /// changes needed to any of them), runs the loop body, then merges
+    /// results back into a full host list afterward. Not intended for
+    /// use with `discover`/`scan network` inside the loop, since those
+    /// operate at the whole-target level, not per-host.
+    fn exec_for_each_host(&mut self, body: &[Stmt]) -> Result<(), String> {
+        let all_hosts = self.hosts.clone();
+        if all_hosts.is_empty() {
+            println!("for each host: no discovered hosts to iterate (run 'discover hosts' first)");
+            return Ok(());
+        }
+        let mut updated_hosts = Vec::new();
+        let mut final_result = Ok(());
+        for host in all_hosts {
+            println!("== for host: {} ==", host.ip);
+            self.hosts = vec![host];
+            for stmt in body {
+                if let Err(e) = self.exec(stmt) {
+                    final_result = Err(e);
+                    break;
+                }
+            }
+            updated_hosts.append(&mut self.hosts);
+            if final_result.is_err() {
+                break;
+            }
+        }
+        self.hosts = updated_hosts;
+        final_result
+    }
+
+    fn eval_condition(&self, condition: &Condition) -> bool {
+        match condition {
+            Condition::PortOpen(port) => self.hosts.iter().any(|h| h.open_ports.contains(port)),
+            Condition::OsContains(text) => self.hosts.iter().any(|h| {
+                h.os
+                    .as_deref()
+                    .map(|os| os.to_lowercase().contains(&text.to_lowercase()))
+                    .unwrap_or(false)
+            }),
+        }
+    }
+
+    fn exec_if(&mut self, condition: &Condition, body: &[Stmt]) -> Result<(), String> {
+        if self.eval_condition(condition) {
+            for stmt in body {
+                self.exec(stmt)?;
+            }
+        }
+        Ok(())
     }
 
     fn exec_discover(&mut self) -> Result<(), String> {

@@ -1,0 +1,13 @@
+target 127.0.0.1
+authorized_scope 127.0.0.1
+
+discover hosts
+scan ports { ports 1-1024 services }
+
+for each host {
+    if port 22 open {
+        report
+    }
+}
+
+report

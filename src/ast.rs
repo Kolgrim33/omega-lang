@@ -15,6 +15,8 @@ pub enum Stmt {
     ExportHosts { destination: ExportDestination },
     Assessment { name: String, body: Vec<Stmt> },
     AuditLog(String),
+    ForEachHost { body: Vec<Stmt> },
+    If { condition: Condition, body: Vec<Stmt> },
 }
 #[derive(Debug, Clone, Default)]
 pub struct ScanOptions {
@@ -59,5 +61,10 @@ pub enum ExportFormat {
 pub struct ExportDestination {
     pub path: String,
     pub format: ExportFormat,
+}
+#[derive(Debug, Clone)]
+pub enum Condition {
+    PortOpen(u16),
+    OsContains(String),
 }
 pub type Program = Vec<Stmt>;
