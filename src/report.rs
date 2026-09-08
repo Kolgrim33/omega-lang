@@ -127,6 +127,8 @@ pub fn write_json(
     fs::write(path, out).map_err(|e| format!("failed to write report to '{}': {}", path, e))
 }
 
+//Function to write webpage
+
 pub fn write_html(
     path: &str,
     target: Option<Cidr>,

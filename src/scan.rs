@@ -81,7 +81,7 @@ impl ProbeBackend for NmapBackend {
             return text.contains("Host is up");
         }
         // nmap is on PATH but this invocation failed (permissions, etc.)
-        // — fall back to a direct probe rather than silently reporting
+        // fall back to a direct probe rather than silently reporting
         // the host as down.
         TcpConnectBackend.discover_host(ip)
     }
