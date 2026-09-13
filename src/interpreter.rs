@@ -5,6 +5,7 @@ use crate::ast::{
 };
 use crate::audit;
 use crate::credcheck;
+use crate::cve;
 use crate::dnschecks;
 use crate::export;
 use crate::ip::{format_ipv4, Cidr};
@@ -280,6 +281,9 @@ impl Interpreter {
         if let Some(category) = &options.nse_scripts {
             self.exec_nse_scripts(category)?;
         }
+        if options.cve_lookup {
+            self.exec_cve_lookup()?;
+        }
         Ok(())
     }
 
@@ -531,6 +535,48 @@ impl Interpreter {
             }
             if let Some(host) = self.hosts.iter_mut().find(|h| h.ip == ip) {
                 host.findings.extend(findings);
+            }
+        }
+        Ok(())
+    }
+
+    /// Looks up known CVEs for each open port's identified service
+    /// version. Runs sequentially (not in parallel like most other
+    /// checks) as a courtesy toward NVD's public rate limits — this is
+    /// the slowest scan type in Omega by design, not by accident.
+    fn exec_cve_lookup(&mut self) -> Result<(), String> {
+        println!("looking up known CVEs for identified services (sequential, respects API rate limits — this is slow)...");
+        let jobs: Vec<(String, u16)> = self
+            .hosts
+            .iter()
+            .flat_map(|h| {
+                let ip = h.ip.clone();
+                h.open_ports
+                    .iter()
+                    .map(move |&p| (ip.clone(), p))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        for (ip, port) in jobs {
+            if let Some(banner) = cve::get_service_banner(&ip, port) {
+                if let Some((product, version)) = cve::extract_product_version(&banner) {
+                    match cve::lookup_cves(&product, &version) {
+                        Ok(findings) if !findings.is_empty() => {
+                            println!("  {}:{}: {} possible CVE(s)", ip, port, findings.len());
+                            if let Some(host) = self.hosts.iter_mut().find(|h| h.ip == ip) {
+                                host.findings.extend(findings);
+                            }
+                        }
+                        Ok(_) => {
+                            println!("  {}:{}: no known CVEs found for {} {}", ip, port, product, version);
+                        }
+                        Err(e) => {
+                            println!("  {}:{}: CVE lookup failed: {}", ip, port, e);
+                        }
+                    }
+                    cve::rate_limit_pause();
+                }
             }
         }
         Ok(())

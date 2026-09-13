@@ -25,6 +25,7 @@ pub struct ScanOptions {
     pub timeout_secs: Option<u64>,
     pub os_detect: bool,
     pub nse_scripts: Option<String>,
+    pub cve_lookup: bool,
 }
 #[derive(Debug, Clone, Default)]
 pub struct WebScanOptions {
