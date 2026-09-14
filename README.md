@@ -9,12 +9,19 @@ describe the security operation you want:
 target 192.168.1.0/24
 audit_log "engagement.jsonl"
 discover hosts
-scan ports { services os_detect nse_scripts "vuln" }
+scan ports { services os_detect nse_scripts "vuln" cve_lookup }
 scan web { paths headers }
 scan tls
 scan creds
 scan network
 scan dns "example.com" { spf dmarc subdomains }
+
+for each host {
+if port 22 open {
+report
+}
+}
+
 export hosts to "targets.txt"
 report to "findings.json"
 
@@ -41,13 +48,22 @@ This is a real tree-walking interpreter, not a mockup:
   `authorized_scope`, `discover [hosts]`, `scan ports { ... }`,
   `scan web { ... }`, `scan dns "..." { ... }`, `scan network`,
   `scan creds`, `scan tls { ... }`, `identify services`,
-  `report [to "..."]`, `export hosts to "..."`, `audit_log "..."`, and
+  `report [to "..."]`, `export hosts to "..."`, `audit_log "..."`,
+  `for each host { ... }`, `if <condition> { ... }`, and
   `assessment "name" { ... }` blocks.
 - **Scope enforcement** (`src/interpreter.rs`) — `authorized_scope` (or the
   first `target`, implicitly) is checked before every host is touched. A
   target outside scope is refused at runtime with
   `ERROR: target X is outside authorized scope.` instead of silently
   running.
+- **Control flow** (`src/ast.rs`, `src/interpreter.rs`) — `for each host {
+  ... }` narrows the interpreter's host list to one host per iteration
+  (so every existing `scan_*` method works inside the loop with zero
+  changes, since they already operate on "whatever hosts currently
+  exist"), then merges results back afterward. `if port <n> open { ... }`
+  and `if os contains "<text>" { ... }` are the two supported
+  conditions — not a general expression language, just these two narrow,
+  practical checks.
 - **Real network backends** (`src/backend.rs`, `src/scan.rs`) — host
   discovery, port scanning, service identification, OS fingerprinting,
   and NSE scripts all actually run, via a `ProbeBackend` trait so new
@@ -66,6 +82,18 @@ This is a real tree-walking interpreter, not a mockup:
     with zero external tools. OS detection and NSE scripts have no honest
     TCP-connect equivalent, so the fallback backend reports those as
     unsupported rather than faking a result.
+- **CVE correlation** (`src/cve.rs`) — the `cve_lookup` flag inside `scan
+  ports { }` looks up known vulnerabilities for each identified service
+  version. Shells out to `curl` for the actual HTTPS request to NVD's
+  public API (Omega doesn't implement TLS encryption, so this follows
+  the same pattern `nmap` shelling-out already uses). Extracts CVE IDs
+  via targeted pattern matching rather than a general JSON parser, and
+  links to the authoritative NVD page instead of risking a mangled
+  description through fragile parsing. Product/version extraction from
+  an `nmap -sV` banner is a best-effort heuristic and will misparse some
+  irregular banners. No hardcoded fallback CVE list — stale security
+  data would be worse than none. Runs sequentially with a pause between
+  lookups, as a courtesy toward NVD's public rate limits.
 - **HTTP vulnerability scanning** (`src/http.rs`, `src/webchecks.rs`) —
   `scan web { paths headers }` is Omega's purpose-built equivalent of
   nikto, distinct from nmap's generic NSE vuln category:
@@ -149,7 +177,7 @@ This is a real tree-walking interpreter, not a mockup:
   `report to "findings.html"` write a hand-rolled structured report (no
   serde/templating dependency), including host MAC/vendor and
   domain-level DNS findings. Every finding — from NSE scripts, web
-  checks, TLS checks, or credential checks — is classified
+  checks, TLS checks, credential checks, or CVE lookups — is classified
   `high`/`medium`/`info` by severity so results are usable at scale, not
   just a wall of raw text.
 - **Target-list export for tool chaining** (`src/export.rs`) — `export
@@ -159,7 +187,9 @@ This is a real tree-walking interpreter, not a mockup:
 - **Parallel execution** (`src/parallel.rs`) — hosts, ports, web, TLS,
   and credential checks are all probed concurrently (bounded thread pool
   built on `std::thread::scope`, no external crates), so `discover
-  hosts` on a /24 doesn't mean 254 sequential connect timeouts.
+  hosts` on a /24 doesn't mean 254 sequential connect timeouts. CVE
+  lookups are a deliberate exception — sequential, to respect NVD's
+  rate limits.
 - **CIDR handling** (`src/ip.rs`) — hand-rolled IPv4/CIDR parsing and host
   iteration, capped at 256 hosts per target as a safety limit.
 
@@ -178,8 +208,10 @@ cargo build --release
 cargo install --path .
 
 
-No external crates are required for the core interpreter — this keeps
-the toolchain requirement low and avoids dependency-version surprises.
+No external crates are required for the core interpreter (`cve_lookup`
+and `scan dns`'s HTTPS-dependent path shell out to `curl`, which is
+assumed to already be on the system) — this keeps the toolchain
+requirement low and avoids dependency-version surprises.
 
 For local development, use the Makefile instead of raw `cargo`/installed
 `omega` commands — it keeps you testing against what you actually just
@@ -221,6 +253,8 @@ omega myscript.omg
   (`scan network`).
 - `examples/creds_test.omg` — default credential checking (`scan
   creds`).
+- `examples/loop_test.omg` — control flow: `for each host { if port 22
+  open { ... } }`.
 
 ## Full syntax reference
 
@@ -235,6 +269,8 @@ services # identify services on open ports
 timeout <Ns> # e.g. "3s" — optional
 os_detect # OS fingerprint (needs nmap + root)
 nse_scripts "<category>" # e.g. "vuln" — needs nmap
+cve_lookup # known CVEs for identified versions
+# (needs curl; slow, respects rate limits)
 }
 
 scan web {
@@ -271,6 +307,18 @@ export hosts to "targets.csv" # ip,port,service columns
 audit_log "path.jsonl" # append-only, per-statement log of
 # every action and its outcome
 
+for each host { # iterate discovered hosts one at a
+... # time; any scan/report/export
+} # statement inside applies to just
+# that host
+
+if port <n> open { # narrow, specific conditions only —
+... # not a general expression language
+}
+if os contains "<text>" {
+...
+}
+
 assessment "name" { ... } # named wrapper — can contain any of the above
 
 
@@ -289,6 +337,8 @@ make test
 - Per-host detail in audit logging (currently logs per-statement only,
   not e.g. which specific host in a range was out of scope, or which
   credential pair succeeded).
+- Variables — named, reusable values (e.g. a port range or timeout set
+  once and referenced in multiple places).
 - A full, encrypting TLS client so `scan web` can fetch real HTTPS
   content (`scan tls` only reads certificate/protocol metadata from a
   partial, unencrypted handshake).
@@ -299,7 +349,6 @@ make test
 - A dry-run/explain mode to preview exactly what a script would do
   before it touches the network.
 - SNMP and SMB-specific information-disclosure checks.
-- CVE correlation for detected service versions.
 - An attack-surface summary section in reports, ranking findings across
   the whole engagement rather than just per-host.
 - UDP scanning, nmap timing templates, and a higher (but still
