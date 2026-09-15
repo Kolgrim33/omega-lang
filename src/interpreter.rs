@@ -24,6 +24,7 @@ pub struct Host {
     pub findings: Vec<String>,
     pub mac: Option<String>,
     pub vendor: Option<String>,
+    pub hostname: Option<String>,
 }
 
 pub struct Interpreter {
@@ -84,6 +85,7 @@ impl Interpreter {
             }
             Stmt::Assessment { name, .. } => ("assessment".to_string(), name.clone()),
             Stmt::AuditLog(path) => ("audit_log".to_string(), path.clone()),
+            Stmt::ScanPtr => ("scan_ptr".to_string(), String::new()),
             Stmt::ForEachHost { .. } => ("for_each_host".to_string(), String::new()),
             Stmt::If { condition, .. } => ("if".to_string(), format!("{:?}", condition)),
         }
@@ -111,6 +113,7 @@ impl Interpreter {
             Stmt::ScanDns { domain, options } => self.exec_scan_dns(domain, options),
             Stmt::ScanNetwork => self.exec_scan_network(),
             Stmt::ScanCreds => self.exec_scan_creds(),
+            Stmt::ScanPtr => self.exec_scan_ptr(),
             Stmt::ScanTls { options } => self.exec_scan_tls(options),
             Stmt::IdentifyServices => self.exec_identify_services(),
             Stmt::Report { destination } => match destination {
@@ -233,6 +236,7 @@ impl Interpreter {
                 findings: Vec::new(),
                 mac: None,
                 vendor: None,
+                hostname: None,
             });
         }
         if alive.is_empty() {
@@ -430,6 +434,7 @@ impl Interpreter {
                     findings: Vec::new(),
                     mac: Some(entry.mac.clone()),
                     vendor,
+                    hostname: None,
                 });
                 found_new += 1;
             }
@@ -582,6 +587,29 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Reverse DNS (PTR) lookups for every discovered host, populating
+    /// Host.hostname where one exists.
+    fn exec_scan_ptr(&mut self) -> Result<(), String> {
+        if self.hosts.is_empty() {
+            return Err("scan ptr: no discovered hosts (run 'discover hosts' first)".to_string());
+        }
+        println!("looking up reverse DNS (PTR) records...");
+        let ips: Vec<String> = self.hosts.iter().map(|h| h.ip.clone()).collect();
+        let results: Vec<(String, Option<String>)> =
+            parallel_map(&ips, |ip| (ip.clone(), crate::dns::reverse_lookup(ip)));
+
+        for (ip, hostname) in results {
+            match &hostname {
+                Some(name) => println!("  {}: {}", ip, name),
+                None => println!("  {}: no PTR record", ip),
+            }
+            if let Some(host) = self.hosts.iter_mut().find(|h| h.ip == ip) {
+                host.hostname = hostname;
+            }
+        }
+        Ok(())
+    }
+
     fn exec_identify_services(&mut self) -> Result<(), String> {
         println!("identifying services...");
         let scannable: Vec<&Host> = self.hosts.iter().filter(|h| !h.open_ports.is_empty()).collect();
@@ -711,6 +739,9 @@ impl Interpreter {
             }
             if let Some(os) = &host.os {
                 println!("  os: {}", os);
+            }
+            if let Some(hostname) = &host.hostname {
+                println!("  hostname: {}", hostname);
             }
             if let Some(mac) = &host.mac {
                 let vendor_str = host.vendor.as_deref().unwrap_or("unknown vendor");

@@ -8,6 +8,7 @@ pub enum Stmt {
     ScanWeb { options: WebScanOptions },
     ScanDns { domain: String, options: DnsScanOptions },
     ScanNetwork,
+    ScanPtr,
     ScanCreds,
     ScanTls { options: TlsScanOptions },
     IdentifyServices,

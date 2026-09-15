@@ -68,6 +68,7 @@ impl Parser {
                         Ok(Stmt::ScanDns { domain, options })
                     }
                     "network" => Ok(Stmt::ScanNetwork),
+                    "ptr" => Ok(Stmt::ScanPtr),
                     "creds" => Ok(Stmt::ScanCreds),
                     "tls" => {
                         let options = if self.check(&Token::LBrace) {

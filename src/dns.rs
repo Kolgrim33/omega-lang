@@ -22,6 +22,7 @@ pub enum RecordType {
     A,
     Txt,
     Ns,
+    Ptr,
 }
 
 impl RecordType {
@@ -30,6 +31,7 @@ impl RecordType {
             RecordType::A => 1,
             RecordType::Ns => 2,
             RecordType::Txt => 16,
+            RecordType::Ptr => 12,
         }
     }
 }
@@ -158,7 +160,7 @@ fn parse_response(buf: &[u8], record_type: RecordType) -> Result<Vec<String>, St
                     }
                     results.push(text);
                 }
-                RecordType::Ns => {
+                RecordType::Ns | RecordType::Ptr => {
                     let (name, _) = read_name(buf, pos)?;
                     results.push(name);
                 }
@@ -228,4 +230,30 @@ fn read_name(buf: &[u8], start: usize) -> Result<(String, usize), String> {
     }
 
     Ok((labels.join("."), end_pos))
+}
+
+/// Builds the reverse-DNS query name for an IPv4 address, e.g.
+/// "192.168.1.1" -> "1.1.168.192.in-addr.arpa" (octets reversed, per
+/// RFC 1035's in-addr.arpa convention).
+fn reverse_dns_name(ip: &str) -> Option<String> {
+    let octets: Vec<&str> = ip.split('.').collect();
+    if octets.len() != 4 {
+        return None;
+    }
+    Some(format!(
+        "{}.{}.{}.{}.in-addr.arpa",
+        octets[3], octets[2], octets[1], octets[0]
+    ))
+}
+
+/// Reverse DNS lookup: given an IPv4 address, returns its hostname via
+/// a PTR record query, if one exists. Trailing dot (if present in the
+/// response) is stripped for display.
+pub fn reverse_lookup(ip: &str) -> Option<String> {
+    let query_name = reverse_dns_name(ip)?;
+    let results = query(&query_name, RecordType::Ptr).ok()?;
+    results
+        .into_iter()
+        .next()
+        .map(|s| s.trim_end_matches('.').to_string())
 }
