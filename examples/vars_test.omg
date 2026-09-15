@@ -1,0 +1,9 @@
+set my_range = "1-1024"
+
+target 127.0.0.1
+authorized_scope 127.0.0.1
+
+discover hosts
+scan ports { ports $my_range services }
+
+report

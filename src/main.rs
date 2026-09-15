@@ -16,6 +16,7 @@ mod parser;
 mod report;
 mod scan;
 mod tlscheck;
+mod vars;
 mod webchecks;
 
 use interpreter::Interpreter;
@@ -51,7 +52,8 @@ fn main() -> ExitCode {
 }
 
 fn run(source: &str) -> Result<(), String> {
-    let tokens = Lexer::new(source).tokenize()?;
+    let source = vars::substitute_variables(source)?;
+    let tokens = Lexer::new(&source).tokenize()?;
     let program = Parser::new(tokens).parse_program()?;
     let mut interp = Interpreter::new();
     interp.run(&program)
