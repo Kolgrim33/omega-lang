@@ -16,6 +16,7 @@ pub enum Stmt {
     ExportHosts { destination: ExportDestination },
     Assessment { name: String, body: Vec<Stmt> },
     AuditLog(String),
+    Timing(String),
     ForEachHost { body: Vec<Stmt> },
     If { condition: Condition, body: Vec<Stmt> },
 }

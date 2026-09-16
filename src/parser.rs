@@ -85,6 +85,10 @@ impl Parser {
                 let path = self.expect_string("an audit log file path in quotes, e.g. \"audit.jsonl\"")?;
                 Ok(Stmt::AuditLog(path))
             }
+            "timing" => {
+                let profile = self.expect_word("a timing profile (aggressive, normal, slow)")?;
+                Ok(Stmt::Timing(profile))
+            }
             "for" => {
                 self.expect_exact_word("each")?;
                 self.expect_exact_word("host")?;

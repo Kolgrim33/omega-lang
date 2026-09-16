@@ -85,6 +85,7 @@ impl Interpreter {
             }
             Stmt::Assessment { name, .. } => ("assessment".to_string(), name.clone()),
             Stmt::AuditLog(path) => ("audit_log".to_string(), path.clone()),
+            Stmt::Timing(profile) => ("timing".to_string(), profile.clone()),
             Stmt::ScanPtr => ("scan_ptr".to_string(), String::new()),
             Stmt::ForEachHost { .. } => ("for_each_host".to_string(), String::new()),
             Stmt::If { condition, .. } => ("if".to_string(), format!("{:?}", condition)),
@@ -142,6 +143,7 @@ impl Interpreter {
                 }
                 Err(e) => Err(e),
             },
+            Stmt::Timing(profile) => crate::parallel::set_timing(profile),
             Stmt::ForEachHost { body } => self.exec_for_each_host(body),
             Stmt::If { condition, body } => self.exec_if(condition, body),
         };
