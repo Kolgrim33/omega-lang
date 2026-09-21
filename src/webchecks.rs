@@ -44,6 +44,8 @@ const COMMON_PATHS: &[(&str, &str)] = &[
     ("/crossdomain.xml", "Flash cross-domain policy (legacy, can be overly permissive)"),
     ("/.aws/credentials", "Possible exposed AWS credentials file"),
     ("/id_rsa", "Possible exposed SSH private key"),
+    ("/conf.php","just a shorter version of config ")
+    
 ];
 
 /// Headers whose *absence* is itself a finding.
