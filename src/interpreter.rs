@@ -6,6 +6,7 @@ use crate::ast::{
 use crate::audit;
 use crate::credcheck;
 use crate::cve;
+use crate::dbcheck;
 use crate::dnschecks;
 use crate::export;
 use crate::ip::{format_ipv4, Cidr};
@@ -87,6 +88,7 @@ impl Interpreter {
             Stmt::AuditLog(path) => ("audit_log".to_string(), path.clone()),
             Stmt::Timing(profile) => ("timing".to_string(), profile.clone()),
             Stmt::ScanPtr => ("scan_ptr".to_string(), String::new()),
+            Stmt::ScanDatabases => ("scan_databases".to_string(), String::new()),
             Stmt::ForEachHost { .. } => ("for_each_host".to_string(), String::new()),
             Stmt::If { condition, .. } => ("if".to_string(), format!("{:?}", condition)),
         }
@@ -115,6 +117,7 @@ impl Interpreter {
             Stmt::ScanNetwork => self.exec_scan_network(),
             Stmt::ScanCreds => self.exec_scan_creds(),
             Stmt::ScanPtr => self.exec_scan_ptr(),
+            Stmt::ScanDatabases => self.exec_scan_databases(),
             Stmt::ScanTls { options } => self.exec_scan_tls(options),
             Stmt::IdentifyServices => self.exec_identify_services(),
             Stmt::Report { destination } => match destination {
@@ -607,6 +610,58 @@ impl Interpreter {
             }
             if let Some(host) = self.hosts.iter_mut().find(|h| h.ip == ip) {
                 host.hostname = hostname;
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks four fixed, well-known database ports directly on every
+    /// discovered host (not filtered by open_ports, since these ports
+    /// are all above 1024 and outside most typical port-range scans).
+    fn exec_scan_databases(&mut self) -> Result<(), String> {
+        if self.hosts.is_empty() {
+            return Err(
+                "scan databases: no discovered hosts (run 'discover hosts' first)".to_string(),
+            );
+        }
+        println!("checking for exposed databases (Redis, MongoDB, Elasticsearch, Memcached)...");
+
+        let scope = self.authorized_scope;
+        type Checker = fn(&str, u16) -> Option<String>;
+        let checks: Vec<(u16, Checker)> = vec![
+            (6379, dbcheck::check_redis as Checker),
+            (27017, dbcheck::check_mongodb as Checker),
+            (9200, dbcheck::check_elasticsearch as Checker),
+            (11211, dbcheck::check_memcached as Checker),
+        ];
+
+        let jobs: Vec<(String, u16, Checker)> = self
+            .hosts
+            .iter()
+            .flat_map(|h| {
+                let ip = h.ip.clone();
+                checks
+                    .iter()
+                    .map(move |&(port, checker)| (ip.clone(), port, checker))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        let results: Vec<(String, Option<String>)> = parallel_map(&jobs, |(ip, port, checker)| {
+            let ip_num = crate::ip::parse_ipv4(ip).unwrap_or(0);
+            if !in_scope(scope, ip_num) {
+                eprintln!("ERROR: target {} is outside authorized scope.", ip);
+                return (ip.clone(), None);
+            }
+            (ip.clone(), checker(ip, *port))
+        });
+
+        for (ip, finding) in results {
+            if let Some(f) = finding {
+                println!("  {}: {}", ip, f);
+                if let Some(host) = self.hosts.iter_mut().find(|h| h.ip == ip) {
+                    host.findings.push(f);
+                }
             }
         }
         Ok(())
