@@ -194,6 +194,7 @@ impl Parser {
             match key.as_str() {
                 "paths" => opts.paths = true,
                 "headers" => opts.headers = true,
+                "waf" => opts.waf = true,
                 "port" => {
                     let raw = self.expect_word("a port number")?;
                     let port: u16 = raw

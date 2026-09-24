@@ -306,6 +306,7 @@ impl Interpreter {
         let explicit_port = options.port;
         let check_paths = options.paths;
         let check_headers = options.headers;
+        let check_waf = options.waf;
 
         let jobs: Vec<(String, u16)> = self
             .hosts
@@ -336,7 +337,7 @@ impl Interpreter {
                 eprintln!("ERROR: target {} is outside authorized scope.", ip);
                 return (ip.clone(), *port, Vec::new());
             }
-            let mut findings = webchecks::run_checks(ip, *port, check_paths, check_headers);
+            let mut findings = webchecks::run_checks(ip, *port, check_paths, check_headers, check_waf);
             if (*port == 443 || *port == 8443) && findings.iter().any(|f| f.contains("failed")) {
                 findings.push(
                     "note: HTTPS/TLS web checks are not yet supported by Omega — this port was probed as plain HTTP"

@@ -62,7 +62,13 @@ const DEFAULT_TIMEOUT_MS: u64 = 2000;
 /// Runs the requested checks against `host:port` and returns finding
 /// lines in the same plain-string style as NSE findings, so they flow
 /// through the same report/severity pipeline.
-pub fn run_checks(host: &str, port: u16, check_paths: bool, check_headers: bool) -> Vec<String> {
+pub fn run_checks(
+    host: &str,
+    port: u16,
+    check_paths: bool,
+    check_headers: bool,
+    check_waf: bool,
+) -> Vec<String> {
     let timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
     let mut findings = Vec::new();
 
@@ -89,6 +95,14 @@ pub fn run_checks(host: &str, port: u16, check_paths: bool, check_headers: bool)
                     if !present {
                         findings.push(format!("Missing security header: {}", expected));
                     }
+                }
+            }
+            if check_waf {
+                for product in detect_waf(&resp.headers) {
+                    findings.push(format!(
+                        "Possible WAF/CDN detected: {} (interpret other findings accordingly — a blocked check may mean filtered, not necessarily safe)",
+                        product
+                    ));
                 }
             }
         }
@@ -125,4 +139,48 @@ fn status_text(code: u16) -> &'static str {
         403 => "Forbidden",
         _ => "",
     }
+}
+
+/// Passive WAF/CDN fingerprinting — reuses the headers already fetched
+/// by the baseline request, no extra probing. Two kinds of signature:
+/// a known substring within a specific header's value (e.g. "cloudflare"
+/// in the Server header), or the mere presence of a vendor-specific
+/// header regardless of its value.
+const WAF_HEADER_VALUE_SIGNATURES: &[(&str, &str, &str)] = &[
+    ("server", "cloudflare", "Cloudflare"),
+    ("server", "akamaighost", "Akamai"),
+    ("server", "sucuri", "Sucuri"),
+    ("server", "big-ip", "F5 BIG-IP ASM"),
+    ("server", "barracuda", "Barracuda WAF"),
+    ("via", "cloudfront", "AWS CloudFront (possibly AWS WAF)"),
+];
+
+const WAF_HEADER_PRESENCE_SIGNATURES: &[(&str, &str)] = &[
+    ("cf-ray", "Cloudflare"),
+    ("cf-cache-status", "Cloudflare"),
+    ("x-amz-cf-id", "AWS CloudFront (possibly AWS WAF)"),
+    ("x-akamai-transformed", "Akamai"),
+    ("x-iinfo", "Imperva/Incapsula"),
+    ("x-cdn", "Incapsula/other CDN-WAF"),
+    ("x-sucuri-id", "Sucuri"),
+    ("x-sucuri-cache", "Sucuri"),
+];
+
+fn detect_waf(headers: &[(String, String)]) -> Vec<String> {
+    let mut detected: Vec<String> = Vec::new();
+    for (name, value) in headers {
+        let name_lower = name.to_lowercase();
+        let value_lower = value.to_lowercase();
+        for (hdr, substr, product) in WAF_HEADER_VALUE_SIGNATURES {
+            if name_lower == *hdr && value_lower.contains(substr) && !detected.iter().any(|d| d == product) {
+                detected.push(product.to_string());
+            }
+        }
+        for (hdr, product) in WAF_HEADER_PRESENCE_SIGNATURES {
+            if name_lower == *hdr && !detected.iter().any(|d| d == product) {
+                detected.push(product.to_string());
+            }
+        }
+    }
+    detected
 }

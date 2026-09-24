@@ -34,6 +34,7 @@ pub struct ScanOptions {
 pub struct WebScanOptions {
     pub paths: bool,
     pub headers: bool,
+    pub waf: bool,
     pub port: Option<u16>,
 }
 #[derive(Debug, Clone, Default)]
